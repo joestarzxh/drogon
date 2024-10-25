@@ -1,7 +1,7 @@
 /**
  *
- *  Result.h
- *  An Tao
+ *  @file Result.h
+ *  @author An Tao
  *
  *  Copyright 2018, An Tao.  All rights reserved.
  *  https://github.com/an-tao/drogon
@@ -17,6 +17,7 @@
 
 #pragma once
 
+#include <drogon/exports.h>
 #include <memory>
 #include <string>
 #include <future>
@@ -53,18 +54,19 @@ enum class SqlStatus
  * which are relatively small and cheap to copy.  Think of a result object as
  * a "smart pointer" to an underlying result set.
  */
-class Result
+class DROGON_EXPORT Result
 {
   public:
-    Result(const ResultImplPtr &ptr) : resultPtr_(ptr)
+    explicit Result(ResultImplPtr ptr) : resultPtr_(std::move(ptr))
     {
     }
+
     Result(const Result &r) noexcept = default;
     Result(Result &&) noexcept = default;
     Result &operator=(const Result &r) noexcept;
     Result &operator=(Result &&) noexcept;
     using DifferenceType = long;
-    using SizeType = unsigned long;
+    using SizeType = size_t;
     using Reference = Row;
     using ConstIterator = ConstResultIterator;
     using Iterator = ConstIterator;
@@ -74,11 +76,24 @@ class Result
     using ConstReverseIterator = ConstReverseResultIterator;
     using ReverseIterator = ConstReverseIterator;
 
+    // C++ type type definition compatibility
+    using value_type = Row;
+    using size_type = SizeType;
+    using difference_type = DifferenceType;
+    using reference = Reference;
+    using const_reference = const Reference;
+    using iterator = Iterator;
+    using const_iterator = ConstIterator;
+    using reverse_iterator = ConstReverseIterator;
+    using const_reverse_iterator = ConstReverseIterator;
+
     SizeType size() const noexcept;
+
     SizeType capacity() const noexcept
     {
         return size();
     }
+
     ConstIterator begin() const noexcept;
     ConstIterator cbegin() const noexcept;
     ConstIterator end() const noexcept;
@@ -125,7 +140,7 @@ class Result
     unsigned long long insertId() const noexcept;
 
 #ifdef _MSC_VER
-    Result() = default;
+    Result() noexcept = default;
 #endif
 
   private:
@@ -135,11 +150,13 @@ class Result
     friend class Row;
     /// Number of given column (throws exception if it doesn't exist).
     RowSizeType columnNumber(const char colName[]) const;
+
     /// Number of given column (throws exception if it doesn't exist).
     RowSizeType columnNumber(const std::string &name) const
     {
         return columnNumber(name.c_str());
     }
+
     /// Get the column oid, for postgresql database
     int oid(RowSizeType column) const noexcept;
 
@@ -147,6 +164,7 @@ class Result
     bool isNull(SizeType row, RowSizeType column) const;
     FieldSizeType getLength(SizeType row, RowSizeType column) const;
 };
+
 inline void swap(Result &one, Result &two) noexcept
 {
     one.swap(two);

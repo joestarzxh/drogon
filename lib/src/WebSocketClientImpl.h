@@ -1,7 +1,7 @@
 /**
  *
- *  WebSocketClientImpl.h
- *  An Tao
+ *  @file WebSocketClientImpl.h
+ *  @author An Tao
  *
  *  Copyright 2018, An Tao.  All rights reserved.
  *  https://github.com/an-tao/drogon
@@ -30,9 +30,9 @@ class WebSocketClientImpl
       public std::enable_shared_from_this<WebSocketClientImpl>
 {
   public:
-    virtual WebSocketConnectionPtr getConnection() override;
+    WebSocketConnectionPtr getConnection() override;
 
-    virtual void setMessageHandler(
+    void setMessageHandler(
         const std::function<void(std::string &&message,
                                  const WebSocketClientPtr &,
                                  const WebSocketMessageType &)> &callback)
@@ -41,40 +41,56 @@ class WebSocketClientImpl
         messageCallback_ = callback;
     }
 
-    virtual void setConnectionClosedHandler(
+    void setConnectionClosedHandler(
         const std::function<void(const WebSocketClientPtr &)> &callback)
         override
     {
         connectionClosedCallback_ = callback;
     }
 
-    virtual void connectToServer(
-        const HttpRequestPtr &request,
-        const WebSocketRequestCallback &callback) override;
+    void connectToServer(const HttpRequestPtr &request,
+                         const WebSocketRequestCallback &callback) override;
 
-    virtual trantor::EventLoop *getLoop() override
+    void setCertPath(const std::string &cert, const std::string &key) override;
+
+    void addSSLConfigs(const std::vector<std::pair<std::string, std::string>>
+                           &sslConfCmds) override;
+
+    trantor::EventLoop *getLoop() override
     {
         return loop_;
     }
 
     WebSocketClientImpl(trantor::EventLoop *loop,
                         const trantor::InetAddress &addr,
-                        bool useSSL = false);
+                        bool useSSL = false,
+                        bool useOldTLS = false,
+                        bool validateCert = true);
 
     WebSocketClientImpl(trantor::EventLoop *loop,
-                        const std::string &hostString);
+                        const std::string &hostString,
+                        bool useOldTLS = false,
+                        bool validateCert = true);
 
-    ~WebSocketClientImpl();
+    void stop() override;
+
+    ~WebSocketClientImpl() override;
 
   private:
     std::shared_ptr<trantor::TcpClient> tcpClientPtr_;
     trantor::EventLoop *loop_;
     trantor::InetAddress serverAddr_;
     std::string domain_;
-    bool useSSL_;
+    bool useSSL_{false};
+    bool useOldTLS_{false};
+    bool validateCert_{true};
     bool upgraded_{false};
+    bool stop_{false};
     std::string wsKey_;
     std::string wsAccept_;
+    std::string clientCertPath_;
+    std::string clientKeyPath_;
+    std::vector<std::pair<std::string, std::string>> sslConfCmds_;
 
     HttpRequestPtr upgradeRequest_;
     std::function<void(std::string &&,

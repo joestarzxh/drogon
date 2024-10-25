@@ -1,7 +1,7 @@
 /**
  *
- *  Row.cc
- *  An Tao
+ *  @file Row.cc
+ *  @author An Tao
  *
  *  Copyright 2018, An Tao.  All rights reserved.
  *  https://github.com/an-tao/drogon
@@ -19,6 +19,7 @@
 #include <drogon/orm/RowIterator.h>
 
 using namespace drogon::orm;
+
 Row::Row(const Result &r, SizeType index) noexcept
     : result_(r), index_(long(index)), end_(r.columns())
 {
@@ -33,6 +34,14 @@ Row::Reference Row::operator[](SizeType index) const noexcept
 {
     assert(index < end_);
     return Field(*this, index);
+}
+
+Row::Reference Row::operator[](int index) const noexcept
+{
+    assert(index >= 0);
+    auto i = static_cast<SizeType>(index);
+    assert(i < end_);
+    return Field(*this, i);
 }
 
 Row::Reference Row::operator[](const char columnName[]) const
@@ -76,7 +85,7 @@ Row::ConstIterator Row::cbegin() const noexcept
 
 Row::ConstIterator Row::end() const noexcept
 {
-    return ConstIterator(*this, size());
+    return ConstIterator(*this, (Field::SizeType)size());
 }
 
 Row::ConstIterator Row::cend() const noexcept

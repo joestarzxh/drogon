@@ -1,7 +1,7 @@
 /**
  *
- *  Criteria.cc
- *  An Tao
+ *  @file Criteria.cc
+ *  @author An Tao
  *
  *  Copyright 2018, An Tao.  All rights reserved.
  *  https://github.com/an-tao/drogon
@@ -21,8 +21,16 @@ namespace orm
 {
 const Criteria operator&&(Criteria cond1, Criteria cond2)
 {
-    assert(cond1);
-    assert(cond2);
+    bool cond1valid = (bool)cond1, cond2valid = (bool)cond2;
+    assert(cond1valid || cond2valid);
+    if (cond1valid && !cond2valid)
+    {
+        return cond1;
+    }
+    if (!cond1valid && cond2valid)
+    {
+        return cond2;
+    }
     Criteria cond;
     cond.conditionString_ = "( ";
     cond.conditionString_ += cond1.conditionString_;
@@ -31,7 +39,8 @@ const Criteria operator&&(Criteria cond1, Criteria cond2)
     cond.conditionString_ += " )";
     auto cond1Ptr = std::make_shared<Criteria>(std::move(cond1));
     auto cond2Ptr = std::make_shared<Criteria>(std::move(cond2));
-    cond.outputArgumentsFunc_ = [=](internal::SqlBinder &binder) {
+    cond.outputArgumentsFunc_ = [cond1Ptr,
+                                 cond2Ptr](internal::SqlBinder &binder) {
         if (cond1Ptr->outputArgumentsFunc_)
         {
             cond1Ptr->outputArgumentsFunc_(binder);
@@ -43,10 +52,19 @@ const Criteria operator&&(Criteria cond1, Criteria cond2)
     };
     return cond;
 }
+
 const Criteria operator||(Criteria cond1, Criteria cond2)
 {
-    assert(cond1);
-    assert(cond2);
+    bool cond1valid = (bool)cond1, cond2valid = (bool)cond2;
+    assert(cond1valid || cond2valid);
+    if (cond1valid && !cond2valid)
+    {
+        return cond1;
+    }
+    if (!cond1valid && cond2valid)
+    {
+        return cond2;
+    }
     Criteria cond;
     cond.conditionString_ = "( ";
     cond.conditionString_ += cond1.conditionString_;
@@ -55,7 +73,8 @@ const Criteria operator||(Criteria cond1, Criteria cond2)
     cond.conditionString_ += " )";
     auto cond1Ptr = std::make_shared<Criteria>(std::move(cond1));
     auto cond2Ptr = std::make_shared<Criteria>(std::move(cond2));
-    cond.outputArgumentsFunc_ = [=](internal::SqlBinder &binder) {
+    cond.outputArgumentsFunc_ = [cond1Ptr,
+                                 cond2Ptr](internal::SqlBinder &binder) {
         if (cond1Ptr->outputArgumentsFunc_)
         {
             cond1Ptr->outputArgumentsFunc_(binder);

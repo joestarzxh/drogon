@@ -1,7 +1,7 @@
 /**
  *
- *  WebSocketConnectionImpl.h
- *  An Tao
+ *  @file WebSocketConnectionImpl.h
+ *  @author An Tao
  *
  *  Copyright 2018, An Tao.  All rights reserved.
  *  https://github.com/an-tao/drogon
@@ -16,6 +16,8 @@
 
 #include "impl_forwards.h"
 #include <drogon/WebSocketConnection.h>
+#include <json/value.h>
+#include <string_view>
 #include <trantor/utils/NonCopyable.h>
 #include <trantor/net/TcpConnection.h>
 
@@ -28,6 +30,7 @@ class WebSocketMessageParser
 {
   public:
     bool parse(trantor::MsgBuffer *buffer);
+
     bool gotAll(std::string &message, WebSocketMessageType &type)
     {
         assert(message.empty());
@@ -44,7 +47,7 @@ class WebSocketMessageParser
     bool gotAll_{false};
 };
 
-class WebSocketConnectionImpl
+class WebSocketConnectionImpl final
     : public WebSocketConnection,
       public std::enable_shared_from_this<WebSocketConnectionImpl>,
       public trantor::NonCopyable
@@ -53,28 +56,32 @@ class WebSocketConnectionImpl
     explicit WebSocketConnectionImpl(const trantor::TcpConnectionPtr &conn,
                                      bool isServer = true);
 
-    virtual void send(
+    ~WebSocketConnectionImpl() override;
+    void send(
         const char *msg,
         uint64_t len,
         const WebSocketMessageType type = WebSocketMessageType::Text) override;
-    virtual void send(
-        const std::string &msg,
+    void send(
+        std::string_view msg,
+        const WebSocketMessageType type = WebSocketMessageType::Text) override;
+    void sendJson(
+        const Json::Value &json,
         const WebSocketMessageType type = WebSocketMessageType::Text) override;
 
-    virtual const trantor::InetAddress &localAddr() const override;
-    virtual const trantor::InetAddress &peerAddr() const override;
+    const trantor::InetAddress &localAddr() const override;
+    const trantor::InetAddress &peerAddr() const override;
 
-    virtual bool connected() const override;
-    virtual bool disconnected() const override;
+    bool connected() const override;
+    bool disconnected() const override;
 
-    virtual void shutdown(
-        const CloseCode code = CloseCode::kNormalClosure,
-        const std::string &reason = "") override;  // close write
-    virtual void forceClose() override;            // close
+    void shutdown(const CloseCode code = CloseCode::kNormalClosure,
+                  const std::string &reason = "") override;  // close write
+    void forceClose() override;                              // close
 
-    virtual void setPingMessage(
-        const std::string &message,
-        const std::chrono::duration<long double> &interval) override;
+    void setPingMessage(const std::string &message,
+                        const std::chrono::duration<double> &interval) override;
+
+    void disablePing() override;
 
     void setMessageCallback(
         const std::function<void(std::string &&,
@@ -107,6 +114,8 @@ class WebSocketConnectionImpl
     bool isServer_{true};
     WebSocketMessageParser parser_;
     trantor::TimerId pingTimerId_{trantor::InvalidTimerId};
+    std::vector<uint32_t> masks_;
+    std::atomic<bool> usingMask_;
 
     std::function<void(std::string &&,
                        const WebSocketConnectionImplPtr &,
@@ -117,6 +126,9 @@ class WebSocketConnectionImpl
     std::function<void(const WebSocketConnectionImplPtr &)> closeCallback_ =
         [](const WebSocketConnectionImplPtr &) {};
     void sendWsData(const char *msg, uint64_t len, unsigned char opcode);
+    void disablePingInLoop();
+    void setPingMessageInLoop(std::string &&message,
+                              const std::chrono::duration<double> &interval);
 };
 
 }  // namespace drogon

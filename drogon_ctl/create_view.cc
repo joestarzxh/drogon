@@ -1,7 +1,7 @@
 /**
  *
- *  create_view.cc
- *  An Tao
+ *  @file create_view.cc
+ *  @author An Tao
  *
  *  Copyright 2018, An Tao.  All rights reserved.
  *  https://github.com/an-tao/drogon
@@ -14,6 +14,7 @@
 
 #include "create_view.h"
 #include "cmd.h"
+#include <drogon/utils/Utilities.h>
 #include <iostream>
 #include <fstream>
 #include <string>
@@ -52,6 +53,7 @@ static std::string &replace_all(std::string &str,
     }
     return str;
 }
+
 static void parseCxxLine(std::ofstream &oSrcFile,
                          const std::string &line,
                          const std::string &streamName,
@@ -65,6 +67,7 @@ static void parseCxxLine(std::ofstream &oSrcFile,
         oSrcFile << tmp << "\n";
     }
 }
+
 static void outputVal(std::ofstream &oSrcFile,
                       const std::string &streamName,
                       const std::string &viewDataName,
@@ -75,12 +78,12 @@ static void outputVal(std::ofstream &oSrcFile,
              << "\"];\n";
     oSrcFile << "    if(val.type()==typeid(const char *)){\n";
     oSrcFile << "        " << streamName
-             << "<<*any_cast<const char *>(&val);\n";
+             << "<<*(std::any_cast<const char *>(&val));\n";
     oSrcFile << "    }else "
                 "if(val.type()==typeid(std::string)||val.type()==typeid(const "
                 "std::string)){\n";
     oSrcFile << "        " << streamName
-             << "<<*any_cast<const std::string>(&val);\n";
+             << "<<*(std::any_cast<const std::string>(&val));\n";
     oSrcFile << "    }\n";
     oSrcFile << "}\n";
 }
@@ -117,7 +120,7 @@ static void parseLine(std::ofstream &oSrcFile,
     {
         // std::cout<<"blank line!"<<std::endl;
         // std::cout<<streamName<<"<<\"\\n\";\n";
-        if (returnFlag)
+        if (returnFlag && !cxx_flag)
             oSrcFile << streamName << "<<\"\\n\";\n";
         return;
     }
@@ -247,9 +250,9 @@ static void parseLine(std::ofstream &oSrcFile,
 
 void create_view::handleCommand(std::vector<std::string> &parameters)
 {
-    for (auto iter = parameters.begin(); iter != parameters.end(); iter++)
+    for (auto iter = parameters.begin(); iter != parameters.end();)
     {
-        auto file = *iter;
+        auto &file = *iter;
         if (file == "-o" || file == "--output")
         {
             iter = parameters.erase(iter);
@@ -258,28 +261,84 @@ void create_view::handleCommand(std::vector<std::string> &parameters)
                 outputPath_ = *iter;
                 iter = parameters.erase(iter);
             }
-            break;
+            continue;
+        }
+        else if (file == "-n" || file == "--namespace")
+        {
+            iter = parameters.erase(iter);
+            if (iter != parameters.end())
+            {
+                namespaces_ = utils::splitString(*iter, "::");
+                iter = parameters.erase(iter);
+            }
+            continue;
+        }
+        else if (file == "--path-to-namespace")
+        {
+            iter = parameters.erase(iter);
+            pathToNamespaceFlag_ = true;
+            continue;
         }
         else if (file[0] == '-')
         {
             std::cout << ARGS_ERROR_STR << std::endl;
             return;
         }
+        ++iter;
     }
     createViewFiles(parameters);
 }
+
 void create_view::createViewFiles(std::vector<std::string> &cspFileNames)
 {
     for (auto const &file : cspFileNames)
     {
         std::cout << "create view:" << file << std::endl;
-        createViewFile(file);
+        if (createViewFile(file) != 0)
+            exit(1);
     }
 }
+
 int create_view::createViewFile(const std::string &script_filename)
 {
     std::cout << "create HttpView Class file by " << script_filename
               << std::endl;
+    if (pathToNamespaceFlag_)
+    {
+        std::string::size_type pos1 = 0, pos2 = 0;
+        if (script_filename.length() >= 2 && script_filename[0] == '.' &&
+            (script_filename[1] == '/' || script_filename[1] == '\\'))
+        {
+            pos1 = pos2 = 2;
+        }
+        else if (script_filename.length() >= 1 &&
+                 (script_filename[0] == '/' || script_filename[0] == '\\'))
+        {
+            pos1 = pos2 = 1;
+        }
+        while (pos2 < script_filename.length() - 1)
+        {
+            if (script_filename[pos2] == '/' || script_filename[pos2] == '\\')
+            {
+                if (pos2 > pos1)
+                {
+                    namespaces_.push_back(
+                        script_filename.substr(pos1, pos2 - pos1));
+                }
+                pos1 = ++pos2;
+            }
+            else
+            {
+                ++pos2;
+            }
+        }
+    }
+    std::string npPrefix;
+    for (auto &np : namespaces_)
+    {
+        npPrefix += np;
+        npPrefix += "_";
+    }
     std::ifstream infile(script_filename.c_str(), std::ifstream::in);
     if (infile)
     {
@@ -292,8 +351,10 @@ int create_view::createViewFile(const std::string &script_filename)
                 className = className.substr(pos + 1);
             }
             std::cout << "className=" << className << std::endl;
-            std::string headFileName = outputPath_ + "/" + className + ".h";
-            std::string sourceFilename = outputPath_ + "/" + className + ".cc";
+            std::string headFileName =
+                outputPath_ + "/" + npPrefix + className + ".h";
+            std::string sourceFilename =
+                outputPath_ + "/" + npPrefix + className + ".cc";
             std::ofstream oHeadFile(headFileName.c_str(), std::ofstream::out);
             std::ofstream oSourceFile(sourceFilename.c_str(),
                                       std::ofstream::out);
@@ -305,7 +366,7 @@ int create_view::createViewFile(const std::string &script_filename)
             }
 
             newViewHeaderFile(oHeadFile, className);
-            newViewSourceFile(oSourceFile, className, infile);
+            newViewSourceFile(oSourceFile, className, npPrefix, infile);
         }
         else
             return -1;
@@ -317,27 +378,38 @@ int create_view::createViewFile(const std::string &script_filename)
     }
     return 0;
 }
+
 void create_view::newViewHeaderFile(std::ofstream &file,
                                     const std::string &className)
 {
     file << "//this file is generated by program automatically,don't modify "
             "it!\n";
     file << "#include <drogon/DrTemplate.h>\n";
-    file << "using namespace drogon;\n";
-    file << "class " << className << ":public DrTemplate<" << className
+    for (auto &np : namespaces_)
+    {
+        file << "namespace " << np << "\n";
+        file << "{\n";
+    }
+    file << "class " << className << ":public drogon::DrTemplate<" << className
          << ">\n";
     file << "{\npublic:\n\t" << className << "(){};\n\tvirtual ~" << className
          << "(){};\n\t"
-            "virtual std::string genText(const DrTemplateData &) override;\n};";
+            "virtual std::string genText(const drogon::DrTemplateData &) "
+            "override;\n};\n";
+    for (std::size_t i = 0; i < namespaces_.size(); ++i)
+    {
+        file << "}\n";
+    }
 }
 
 void create_view::newViewSourceFile(std::ofstream &file,
                                     const std::string &className,
+                                    const std::string &namespacePrefix,
                                     std::ifstream &infile)
 {
     file << "//this file is generated by program(drogon_ctl) "
             "automatically,don't modify it!\n";
-    file << "#include \"" << className << ".h\"\n";
+    file << "#include \"" << namespacePrefix << className << ".h\"\n";
     file << "#include <drogon/utils/OStringStream.h>\n";
     file << "#include <string>\n";
     file << "#include <map>\n";
@@ -350,6 +422,7 @@ void create_view::newViewSourceFile(std::ofstream &file,
     file << "#include <list>\n";
     file << "#include <deque>\n";
     file << "#include <queue>\n";
+
     // Find layout tag
     std::string layoutName;
     std::regex layoutReg("<%layout[ \\t]+(((?!%\\}).)*[^ \\t])[ \\t]*%>");
@@ -378,7 +451,7 @@ void create_view::newViewSourceFile(std::ofstream &file,
             std::transform(lowerBuffer.begin(),
                            lowerBuffer.end(),
                            lowerBuffer.begin(),
-                           ::tolower);
+                           [](unsigned char c) { return tolower(c); });
             if ((pos = lowerBuffer.find(cxx_include)) != std::string::npos)
             {
                 // std::cout<<"haha find it!"<<endl;
@@ -419,8 +492,23 @@ void create_view::newViewSourceFile(std::ofstream &file,
         infile.seekg(0, std::ifstream::beg);
     }
 
-    // std::cout<<"file pos:"<<infile.tellg()<<std::endl;
-
+    if (!namespaces_.empty())
+    {
+        file << "using namespace ";
+        for (std::size_t i = 0; i < namespaces_.size(); ++i)
+        {
+            if (i != namespaces_.size() - 1)
+            {
+                file << namespaces_[i] << "::";
+            }
+            else
+            {
+                file << namespaces_[i] << ";";
+            }
+        }
+        file << "\n";
+    }
+    file << "using namespace drogon;\n";
     std::string viewDataName = className + "_view_data";
     // virtual std::string genText(const DrTemplateData &)
     file << "std::string " << className << "::genText(const DrTemplateData& "

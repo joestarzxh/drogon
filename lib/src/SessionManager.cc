@@ -13,14 +13,21 @@
  */
 
 #include "SessionManager.h"
-#include <drogon/utils/Utilities.h>
 
 using namespace drogon;
 
-SessionManager::SessionManager(trantor::EventLoop *loop, size_t timeout)
-    : loop_(loop), timeout_(timeout)
+SessionManager::SessionManager(
+    trantor::EventLoop *loop,
+    size_t timeout,
+    const std::vector<AdviceStartSessionCallback> &startAdvices,
+    const std::vector<AdviceDestroySessionCallback> &destroyAdvices,
+    IdGeneratorCallback idGeneratorCallback)
+    : loop_(loop),
+      timeout_(timeout),
+      sessionStartAdvices_(startAdvices),
+      sessionDestroyAdvices_(destroyAdvices),
+      idGeneratorCallback_(idGeneratorCallback)
 {
-    assert(timeout_ >= 0);
     if (timeout_ > 0)
     {
         size_t wheelNum = 1;
@@ -39,14 +46,46 @@ SessionManager::SessionManager(trantor::EventLoop *loop, size_t timeout)
                 tmpTimeout = tmpTimeout / 100;
             }
         }
+
         sessionMapPtr_ = std::unique_ptr<CacheMap<std::string, SessionPtr>>(
             new CacheMap<std::string, SessionPtr>(
-                loop_, 1.0, wheelNum, bucketNum));
+                loop_,
+                1.0,
+                wheelNum,
+                bucketNum,
+                [this](const std::string &key) {
+                    for (auto &advice : sessionStartAdvices_)
+                    {
+                        advice(key);
+                    }
+                },
+                [this](const std::string &key) {
+                    for (auto &advice : sessionDestroyAdvices_)
+                    {
+                        advice(key);
+                    }
+                }));
     }
     else if (timeout_ == 0)
     {
         sessionMapPtr_ = std::unique_ptr<CacheMap<std::string, SessionPtr>>(
-            new CacheMap<std::string, SessionPtr>(loop_, 0, 0, 0));
+            new CacheMap<std::string, SessionPtr>(
+                loop_,
+                0,
+                0,
+                0,
+                [this](const std::string &key) {
+                    for (auto &advice : sessionStartAdvices_)
+                    {
+                        advice(key);
+                    }
+                },
+                [this](const std::string &key) {
+                    for (auto &advice : sessionDestroyAdvices_)
+                    {
+                        advice(key);
+                    }
+                }));
     }
 }
 
@@ -70,13 +109,14 @@ SessionPtr SessionManager::getSession(const std::string &sessionID,
             }
         },
         timeout_);
+
     return sessionPtr;
 }
 
 void SessionManager::changeSessionId(const SessionPtr &sessionPtr)
 {
     auto oldId = sessionPtr->sessionId();
-    auto newId = utils::getUuid();
+    auto newId = idGeneratorCallback_();
     sessionPtr->setSessionId(newId);
     sessionMapPtr_->insert(newId, sessionPtr, timeout_);
     // For requests sent before setting the new session ID to the client, we

@@ -14,28 +14,62 @@
 
 #include <drogon/Cookie.h>
 #include <drogon/utils/Utilities.h>
+#include <trantor/utils/Logger.h>
 using namespace drogon;
+
 std::string Cookie::cookieString() const
 {
-    std::string ret = "Set-Cookie: ";
-    ret.append(key_).append("= ").append(value_).append("; ");
+    constexpr std::string_view prefix = "Set-Cookie: ";
+    std::string ret;
+    // reserve space to reduce frequency allocation
+    ret.reserve(prefix.size() + key_.size() + value_.size() + 30);
+    ret = prefix;
+    ret.append(key_).append("=").append(value_).append("; ");
     if (expiresDate_.microSecondsSinceEpoch() !=
             (std::numeric_limits<int64_t>::max)() &&
         expiresDate_.microSecondsSinceEpoch() >= 0)
     {
-        ret.append("Expires= ")
+        ret.append("Expires=")
             .append(utils::getHttpFullDate(expiresDate_))
+            .append("; ");
+    }
+    if (maxAge_.has_value())
+    {
+        ret.append("Max-Age=")
+            .append(std::to_string(maxAge_.value()))
             .append("; ");
     }
     if (!domain_.empty())
     {
-        ret.append("Domain= ").append(domain_).append("; ");
+        ret.append("Domain=").append(domain_).append("; ");
     }
     if (!path_.empty())
     {
-        ret.append("Path= ").append(path_).append("; ");
+        ret.append("Path=").append(path_).append("; ");
     }
-    if (secure_)
+    if (sameSite_ != SameSite::kNull)
+    {
+        switch (sameSite_)
+        {
+            case SameSite::kLax:
+                ret.append("SameSite=Lax; ");
+                break;
+            case SameSite::kStrict:
+                ret.append("SameSite=Strict; ");
+                break;
+            case SameSite::kNone:
+                ret.append("SameSite=None; ");
+                // Cookies with SameSite=None must now also specify the Secure
+                // attribute (they require a secure context/HTTPS).
+                ret.append("Secure; ");
+                break;
+            default:
+                // Lax replaced None as the default value to ensure that users
+                // have reasonably robust defense against some CSRF attacks
+                ret.append("SameSite=Lax; ");
+        }
+    }
+    if (secure_ && sameSite_ != SameSite::kNone)
     {
         ret.append("Secure; ");
     }

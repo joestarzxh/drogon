@@ -27,7 +27,9 @@
 #define WS_PATH_LIST_BEGIN        \
     static void initPathRouting() \
     {
-#define WS_PATH_ADD(path, ...) registerSelf__(path, {__VA_ARGS__});
+#define WS_PATH_ADD(path, ...) registerSelf__(path, {__VA_ARGS__})
+#define WS_ADD_PATH_VIA_REGEX(regExp, ...) \
+    registerSelfRegex__(regExp, {__VA_ARGS__})
 #define WS_PATH_LIST_END }
 
 namespace drogon
@@ -71,6 +73,7 @@ class WebSocketController : public DrObject<T>, public WebSocketControllerBase
 {
   public:
     static const bool isAutoCreation = AutoCreation;
+
     virtual ~WebSocketController()
     {
     }
@@ -79,15 +82,31 @@ class WebSocketController : public DrObject<T>, public WebSocketControllerBase
     WebSocketController()
     {
     }
+
     static void registerSelf__(
         const std::string &path,
-        const std::vector<internal::HttpConstraint> &filtersAndMethods)
+        const std::vector<internal::HttpConstraint> &constraints)
     {
         LOG_TRACE << "register websocket controller("
-                  << WebSocketController<T>::classTypeName()
+                  << WebSocketController<T, AutoCreation>::classTypeName()
                   << ") on path:" << path;
         app().registerWebSocketController(
-            path, WebSocketController<T>::classTypeName(), filtersAndMethods);
+            path,
+            WebSocketController<T, AutoCreation>::classTypeName(),
+            constraints);
+    }
+
+    static void registerSelfRegex__(
+        const std::string &regExp,
+        const std::vector<internal::HttpConstraint> &constraints)
+    {
+        LOG_TRACE << "register websocket controller("
+                  << WebSocketController<T, AutoCreation>::classTypeName()
+                  << ") on regExp:" << regExp;
+        app().registerWebSocketControllerRegex(
+            regExp,
+            WebSocketController<T, AutoCreation>::classTypeName(),
+            constraints);
     }
 
   private:
@@ -102,13 +121,16 @@ class WebSocketController : public DrObject<T>, public WebSocketControllerBase
             }
         }
     };
+
     friend pathRegistrator;
     static pathRegistrator registrator_;
+
     virtual void *touch()
     {
         return &registrator_;
     }
 };
+
 template <typename T, bool AutoCreation>
 typename WebSocketController<T, AutoCreation>::pathRegistrator
     WebSocketController<T, AutoCreation>::registrator_;

@@ -1,7 +1,7 @@
 /**
  *
- *  Field.h
- *  An Tao
+ *  @file Field.h
+ *  @author An Tao
  *
  *  Copyright 2018, An Tao.  All rights reserved.
  *  https://github.com/an-tao/drogon
@@ -17,7 +17,8 @@
 
 #pragma once
 
-#include <drogon/utils/string_view.h>
+#include <drogon/exports.h>
+#include <string_view>
 #include <drogon/orm/ArrayParser.h>
 #include <drogon/orm/Result.h>
 #include <drogon/orm/Row.h>
@@ -39,7 +40,7 @@ namespace orm
  * A field represents one entry in a row.  It represents an actual value
  * in the result set, and can be converted to various types.
  */
-class Field
+class DROGON_EXPORT Field
 {
   public:
     using SizeType = unsigned long;
@@ -117,6 +118,7 @@ class Field
     {
         return ArrayParser(result_.getValue(row_, column_));
     }
+
     template <typename T>
     std::vector<std::shared_ptr<T>> asArray() const
     {
@@ -158,20 +160,22 @@ class Field
   private:
     const Result result_;
 };
+
 template <>
-std::string Field::as<std::string>() const;
+DROGON_EXPORT std::string Field::as<std::string>() const;
 template <>
-const char *Field::as<const char *>() const;
+DROGON_EXPORT const char *Field::as<const char *>() const;
 template <>
-char *Field::as<char *>() const;
+DROGON_EXPORT char *Field::as<char *>() const;
 template <>
-std::vector<char> Field::as<std::vector<char>>() const;
+DROGON_EXPORT std::vector<char> Field::as<std::vector<char>>() const;
+
 template <>
-inline drogon::string_view Field::as<drogon::string_view>() const
+inline std::string_view Field::as<std::string_view>() const
 {
     auto first = result_.getValue(row_, column_);
     auto length = result_.getLength(row_, column_);
-    return drogon::string_view(first, length);
+    return {first, length};
 }
 
 template <>
@@ -224,7 +228,7 @@ inline int8_t Field::as<int8_t>() const
 {
     if (isNull())
         return 0;
-    return atoi(result_.getValue(row_, column_));
+    return static_cast<int8_t>(atoi(result_.getValue(row_, column_)));
 }
 
 template <>
@@ -241,7 +245,7 @@ inline unsigned int Field::as<unsigned int>() const
     if (isNull())
         return 0;
     return static_cast<unsigned int>(
-        std::stoi(result_.getValue(row_, column_)));
+        std::stoul(result_.getValue(row_, column_)));
 }
 
 template <>

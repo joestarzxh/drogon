@@ -17,6 +17,7 @@
 #include <drogon/orm/Exception.h>
 #include <drogon/utils/Utilities.h>
 #include <trantor/utils/Logger.h>
+#include <exception>
 #include <memory>
 #include <algorithm>
 #include <stdio.h>
@@ -28,19 +29,20 @@ namespace drogon
 namespace orm
 {
 static const unsigned int maxBatchCount = 256;
-Result makeResult(
-    const std::shared_ptr<PGresult> &r = std::shared_ptr<PGresult>(nullptr))
+
+Result makeResult(std::shared_ptr<PGresult> &&r = nullptr)
 {
-    return Result(
-        std::shared_ptr<PostgreSQLResultImpl>(new PostgreSQLResultImpl(r)));
+    return Result(std::make_shared<PostgreSQLResultImpl>(std::move(r)));
 }
 
-bool checkSql(const string_view &sql_)
+bool checkSql(const std::string_view &sql_)
 {
     if (sql_.length() > 1024)
         return true;
     std::string sql{sql_.data(), sql_.length()};
-    std::transform(sql.begin(), sql.end(), sql.begin(), tolower);
+    std::transform(sql.begin(), sql.end(), sql.begin(), [](unsigned char c) {
+        return tolower(c);
+    });
     return (sql.find("update") != std::string::npos ||
             sql.find("into") != std::string::npos ||
             sql.find("delete") != std::string::npos ||
@@ -48,6 +50,7 @@ bool checkSql(const string_view &sql_)
             sql.find("truncate") != std::string::npos ||
             sql.find("lock") != std::string::npos ||
             sql.find("create") != std::string::npos ||
+            sql.find("call") != std::string::npos ||
             sql.find("alter") != std::string::npos);
 }
 
@@ -73,23 +76,38 @@ int PgConnection::flush()
     }
     return ret;
 }
+
 PgConnection::PgConnection(trantor::EventLoop *loop,
-                           const std::string &connInfo)
+                           const std::string &connInfo,
+                           bool autoBatch)
     : DbConnection(loop),
+      autoBatch_(autoBatch),
       connectionPtr_(
           std::shared_ptr<PGconn>(PQconnectStart(connInfo.c_str()),
                                   [](PGconn *conn) { PQfinish(conn); })),
       channel_(loop, PQsocket(connectionPtr_.get()))
 {
+}
+
+void PgConnection::init()
+{
     PQsetnonblocking(connectionPtr_.get(), 1);
     if (channel_.fd() < 0)
     {
-        LOG_FATAL << "Socket fd < 0, Usually this is because the number of "
-                     "files opened by the program exceeds the system "
-                     "limit. Please use the ulimit command to check.";
-        exit(1);
+        LOG_ERROR << "Connection with Postgres could not be established";
+
+        if (closeCallback_)
+        {
+            auto thisPtr = shared_from_this();
+            closeCallback_(thisPtr);
+        }
+        return;
     }
-    channel_.setReadCallback([=]() {
+    channel_.setReadCallback([this]() {
+        if (status_ == ConnectStatus::Bad)
+        {
+            return;
+        }
         if (status_ != ConnectStatus::Ok)
         {
             pgPoll();
@@ -99,7 +117,7 @@ PgConnection::PgConnection(trantor::EventLoop *loop,
             handleRead();
         }
     });
-    channel_.setWriteCallback([=]() {
+    channel_.setWriteCallback([this]() {
         if (status_ == ConnectStatus::Ok)
         {
             auto ret = PQflush(connectionPtr_.get());
@@ -121,8 +139,8 @@ PgConnection::PgConnection(trantor::EventLoop *loop,
             pgPoll();
         }
     });
-    channel_.setCloseCallback([=]() { handleClosed(); });
-    channel_.setErrorCallback([=]() { handleClosed(); });
+    channel_.setCloseCallback([this]() { handleClosed(); });
+    channel_.setErrorCallback([this]() { handleClosed(); });
     channel_.enableReading();
     channel_.enableWriting();
 }
@@ -159,7 +177,6 @@ void PgConnection::pgPoll()
 {
     loop_->assertInLoopThread();
     auto connStatus = PQconnectPoll(connectionPtr_.get());
-
     switch (connStatus)
     {
         case PGRES_POLLING_FAILED:
@@ -185,7 +202,7 @@ void PgConnection::pgPoll()
             if (status_ != ConnectStatus::Ok)
             {
                 status_ = ConnectStatus::Ok;
-                if (!PQbeginBatchMode(connectionPtr_.get()))
+                if (!PQenterPipelineMode(connectionPtr_.get()))
                 {
                     handleClosed();
                     return;
@@ -207,7 +224,7 @@ void PgConnection::pgPoll()
 }
 
 void PgConnection::execSqlInLoop(
-    string_view &&sql,
+    std::string_view &&sql,
     size_t paraNum,
     std::vector<const char *> &&parameters,
     std::vector<int> &&length,
@@ -231,9 +248,10 @@ void PgConnection::execSqlInLoop(
             [thisPtr = shared_from_this()]() { thisPtr->sendBatchedSql(); });
     }
 }
+
 int PgConnection::sendBatchEnd()
 {
-    if (!PQsendEndBatch(connectionPtr_.get()))
+    if (!PQpipelineSync(connectionPtr_.get()))
     {
         isWorking_ = false;
         handleFatalError(true);
@@ -242,6 +260,7 @@ int PgConnection::sendBatchEnd()
     }
     return 1;
 }
+
 void PgConnection::sendBatchedSql()
 {
     if (isWorking_)
@@ -250,10 +269,6 @@ void PgConnection::sendBatchedSql()
         {
             sendBatchEnd_ = false;
             if (!sendBatchEnd())
-            {
-                return;
-            }
-            if (flush())
             {
                 return;
             }
@@ -291,7 +306,10 @@ void PgConnection::sendBatchedSql()
                     return;
                 }
                 cmd->preparingStatement_ = statName;
-                cmd->isChanging_ = checkSql(cmd->sql_);
+                if (autoBatch_)
+                {
+                    cmd->isChanging_ = checkSql(cmd->sql_);
+                }
                 if (flush())
                 {
                     return;
@@ -300,25 +318,31 @@ void PgConnection::sendBatchedSql()
             else
             {
                 statName = iter->second.first;
-                cmd->isChanging_ = iter->second.second;
+                if (autoBatch_)
+                {
+                    cmd->isChanging_ = iter->second.second;
+                }
             }
         }
         else
         {
             statName = cmd->preparingStatement_;
         }
-        if (batchSqlCommands_.size() == 1 || cmd->sql_.length() > 1024 ||
-            batchCount_ > maxBatchCount)
+        if (autoBatch_)
         {
-            sendBatchEnd_ = true;
-            batchCount_ = 0;
+            if (batchSqlCommands_.size() == 1 || cmd->sql_.length() > 1024 ||
+                batchCount_ > maxBatchCount)
+            {
+                sendBatchEnd_ = true;
+                batchCount_ = 0;
+            }
+            else if (cmd->isChanging_)
+            {
+                sendBatchEnd_ = true;
+                batchCount_ = 0;
+            }
+            ++batchCount_;
         }
-        else if (cmd->isChanging_)
-        {
-            sendBatchEnd_ = true;
-            batchCount_ = 0;
-        }
-        ++batchCount_;
         if (PQsendQueryPrepared(connectionPtr_.get(),
                                 statName.c_str(),
                                 cmd->parametersNumber_,
@@ -332,19 +356,37 @@ void PgConnection::sendBatchedSql()
             handleClosed();
             return;
         }
+
         batchCommandsForWaitingResults_.push_back(std::move(cmd));
         batchSqlCommands_.pop_front();
-        if (flush())
+        if (!autoBatch_)
         {
-            return;
+            if (!sendBatchEnd())
+            {
+                return;
+            }
         }
-        if (sendBatchEnd_)
+        else
+        {
+            if (flush())
+            {
+                return;
+            }
+        }
+        if (autoBatch_ && sendBatchEnd_)
         {
             sendBatchEnd_ = false;
             if (!sendBatchEnd())
             {
                 return;
             }
+            if (flush())
+            {
+                return;
+            }
+        }
+        else
+        {
             if (flush())
             {
                 return;
@@ -380,28 +422,46 @@ void PgConnection::handleRead()
 
     while (!PQisBusy(connectionPtr_.get()))
     {
+        // TODO: should optimize order of checking
+        // Check notification
+        std::shared_ptr<PGnotify> notify;
+        while (
+            (notify =
+                 std::shared_ptr<PGnotify>(PQnotifies(connectionPtr_.get()),
+                                           [](PGnotify *p) { PQfreemem(p); })))
+        {
+            messageCallback_({notify->relname}, {notify->extra});
+        }
+
+        // Check query result
         res = std::shared_ptr<PGresult>(PQgetResult(connectionPtr_.get()),
                                         [](PGresult *p) { PQclear(p); });
         if (!res)
         {
             /*
-             * No more results from this query, advance to
-             * the next result
+             * No more results currtently available.
              */
-            if (!PQgetNextQuery(connectionPtr_.get()))
+            if (!PQsendFlushRequest(connectionPtr_.get()))
+            {
+                LOG_ERROR << "Failed to PQsendFlushRequest:"
+                          << PQerrorMessage(connectionPtr_.get());
+                return;
+            }
+            res = std::shared_ptr<PGresult>(PQgetResult(connectionPtr_.get()),
+                                            [](PGresult *p) { PQclear(p); });
+            if (!res)
             {
                 return;
             }
-            continue;
         }
         auto type = PQresultStatus(res.get());
         if (type == PGRES_BAD_RESPONSE || type == PGRES_FATAL_ERROR ||
-            type == PGRES_BATCH_ABORTED)
+            type == PGRES_PIPELINE_ABORTED)
         {
-            handleFatalError(false);
+            handleFatalError(false, type == PGRES_PIPELINE_ABORTED);
             continue;
         }
-        if (type == PGRES_BATCH_END)
+        if (type == PGRES_PIPELINE_SYNC)
         {
             if (batchCommandsForWaitingResults_.empty() &&
                 batchSqlCommands_.empty())
@@ -419,13 +479,13 @@ void PgConnection::handleRead()
             {
                 auto r = preparedStatements_.insert(
                     std::string{cmd->sql_.data(), cmd->sql_.length()});
-                preparedStatementsMap_[string_view{r.first->c_str(),
-                                                   r.first->length()}] = {
+                preparedStatementsMap_[std::string_view{r.first->c_str(),
+                                                        r.first->length()}] = {
                     std::move(cmd->preparingStatement_), cmd->isChanging_};
                 cmd->preparingStatement_.clear();
                 continue;
             }
-            auto r = makeResult(res);
+            auto r = makeResult(std::move(res));
             cmd->callback_(r);
             batchCommandsForWaitingResults_.pop_front();
             continue;
@@ -437,8 +497,8 @@ void PgConnection::handleRead()
         {
             auto r = preparedStatements_.insert(
                 std::string{cmd->sql_.data(), cmd->sql_.length()});
-            preparedStatementsMap_[string_view{r.first->c_str(),
-                                               r.first->length()}] = {
+            preparedStatementsMap_[std::string_view{r.first->c_str(),
+                                                    r.first->length()}] = {
                 std::move(cmd->preparingStatement_), cmd->isChanging_};
             cmd->preparingStatement_.clear();
             continue;
@@ -450,54 +510,45 @@ void PgConnection::doAfterPreparing()
 {
 }
 
-void PgConnection::handleFatalError(bool clearAll)
+void PgConnection::handleFatalError(bool clearAll, bool isAbortPipeline)
 {
-    LOG_ERROR << PQerrorMessage(connectionPtr_.get());
-    try
+    std::string errmsg =
+        isAbortPipeline
+            ? "Command didn't run because of an abort earlier in a pipeline"
+            : PQerrorMessage(connectionPtr_.get());
+    LOG_ERROR << errmsg;
+    auto exceptPtr = std::make_exception_ptr(Failure(errmsg));
+    if (clearAll)
     {
-        throw Failure(PQerrorMessage(connectionPtr_.get()));
-    }
-    catch (...)
-    {
-        auto exceptPtr = std::current_exception();
-        if (clearAll)
+        for (auto &cmd : batchCommandsForWaitingResults_)
         {
-            for (auto &cmd : batchCommandsForWaitingResults_)
-            {
-                cmd->exceptionCallback_(exceptPtr);
-            }
-            for (auto &cmd : batchSqlCommands_)
-            {
-                cmd->exceptionCallback_(exceptPtr);
-            }
-            batchCommandsForWaitingResults_.clear();
-            batchSqlCommands_.clear();
+            cmd->exceptionCallback_(exceptPtr);
+        }
+        for (auto &cmd : batchSqlCommands_)
+        {
+            cmd->exceptionCallback_(exceptPtr);
+        }
+        batchCommandsForWaitingResults_.clear();
+        batchSqlCommands_.clear();
+    }
+    else
+    {
+        if (!batchSqlCommands_.empty() &&
+            !batchSqlCommands_.front()->preparingStatement_.empty())
+        {
+            batchSqlCommands_.front()->exceptionCallback_(exceptPtr);
+            batchSqlCommands_.pop_front();
+        }
+        else if (!batchCommandsForWaitingResults_.empty())
+        {
+            auto &cmd = batchCommandsForWaitingResults_.front();
+            cmd->exceptionCallback_(exceptPtr);
+            batchCommandsForWaitingResults_.pop_front();
         }
         else
         {
-            if (!batchSqlCommands_.empty() &&
-                !batchSqlCommands_.front()->preparingStatement_.empty())
-            {
-                batchSqlCommands_.front()->exceptionCallback_(exceptPtr);
-                batchSqlCommands_.pop_front();
-            }
-            else if (!batchCommandsForWaitingResults_.empty())
-            {
-                auto &cmd = batchCommandsForWaitingResults_.front();
-                if (!cmd->preparingStatement_.empty())
-                {
-                    cmd->preparingStatement_.clear();
-                }
-                else
-                {
-                    cmd->exceptionCallback_(exceptPtr);
-                    batchCommandsForWaitingResults_.pop_front();
-                }
-            }
-            else
-            {
-                assert(false);
-            }
+            // PQsendPrepare failed, error message has already been reported
+            // Ignore PQsendQueryPrepared failure
         }
     }
 }

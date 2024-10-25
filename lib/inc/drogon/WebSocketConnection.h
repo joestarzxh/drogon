@@ -1,7 +1,7 @@
 /**
  *
- *  WebSocketConnection.h
- *  An Tao
+ *  @file WebSocketConnection.h
+ *  @author An Tao
  *
  *  Copyright 2018, An Tao.  All rights reserved.
  *  https://github.com/an-tao/drogon
@@ -14,11 +14,14 @@
 
 #pragma once
 
+#include <json/value.h>
 #include <memory>
 #include <string>
 #include <drogon/HttpTypes.h>
+#include <string_view>
 #include <trantor/net/InetAddress.h>
 #include <trantor/utils/NonCopyable.h>
+
 namespace drogon
 {
 enum class CloseCode
@@ -81,6 +84,7 @@ enum class CloseCode
        be verified).*/
     kTLSFailed = 1015
 };
+
 /**
  * @brief The WebSocket connection abstract class.
  *
@@ -110,7 +114,17 @@ class WebSocketConnection
      * @param type The message type.
      */
     virtual void send(
-        const std::string &msg,
+        std::string_view msg,
+        const WebSocketMessageType type = WebSocketMessageType::Text) = 0;
+
+    /**
+     * @brief Send a message to the peer
+     *
+     * @param json The JSON message to be sent.
+     * @param type The message type.
+     */
+    virtual void sendJson(
+        const Json::Value &json,
         const WebSocketMessageType type = WebSocketMessageType::Text) = 0;
 
     /// Return the local IP address and port number of the connection
@@ -202,13 +216,21 @@ class WebSocketConnection
      * @note
      * Both the server and the client in Drogon automatically send the pong
      * message after receiving the ping message.
+     * An empty ping message is sent every 30 seconds by default. The method
+     * overrides the default behavior.
      */
     virtual void setPingMessage(
         const std::string &message,
-        const std::chrono::duration<long double> &interval) = 0;
+        const std::chrono::duration<double> &interval) = 0;
+
+    /**
+     * @brief Disable sending ping messages to the peer.
+     */
+    virtual void disablePing() = 0;
 
   private:
     std::shared_ptr<void> contextPtr_;
 };
+
 using WebSocketConnectionPtr = std::shared_ptr<WebSocketConnection>;
 }  // namespace drogon

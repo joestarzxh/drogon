@@ -59,25 +59,26 @@ template <typename T, bool AutoCreation = true>
 class HttpController : public DrObject<T>, public HttpControllerBase
 {
   public:
-    static const bool isAutoCreation = AutoCreation;
+    static constexpr bool isAutoCreation = AutoCreation;
 
   protected:
     template <typename FUNCTION>
     static void registerMethod(
         FUNCTION &&function,
         const std::string &pattern,
-        const std::vector<internal::HttpConstraint> &filtersAndMethods =
-            std::vector<internal::HttpConstraint>{},
+        const std::vector<internal::HttpConstraint> &constraints = {},
         bool classNameInPath = true,
         const std::string &handlerName = "")
     {
         if (classNameInPath)
         {
             std::string path = "/";
-            path.append(HttpController<T>::classTypeName());
-            LOG_TRACE << "classname:" << HttpController<T>::classTypeName();
+            path.append(HttpController<T, AutoCreation>::classTypeName());
+            LOG_TRACE << "classname:"
+                      << HttpController<T, AutoCreation>::classTypeName();
 
-            // transform(path.begin(), path.end(), path.begin(), tolower);
+            // transform(path.begin(), path.end(), path.begin(), [](unsigned
+            // char c){ return tolower(c); });
             std::string::size_type pos;
             while ((pos = path.find("::")) != std::string::npos)
             {
@@ -86,12 +87,12 @@ class HttpController : public DrObject<T>, public HttpControllerBase
             if (pattern.empty() || pattern[0] == '/')
                 app().registerHandler(path + pattern,
                                       std::forward<FUNCTION>(function),
-                                      filtersAndMethods,
+                                      constraints,
                                       handlerName);
             else
                 app().registerHandler(path + "/" + pattern,
                                       std::forward<FUNCTION>(function),
-                                      filtersAndMethods,
+                                      constraints,
                                       handlerName);
         }
         else
@@ -103,7 +104,7 @@ class HttpController : public DrObject<T>, public HttpControllerBase
             }
             app().registerHandler(path,
                                   std::forward<FUNCTION>(function),
-                                  filtersAndMethods,
+                                  constraints,
                                   handlerName);
         }
     }
@@ -112,13 +113,13 @@ class HttpController : public DrObject<T>, public HttpControllerBase
     static void registerMethodViaRegex(
         FUNCTION &&function,
         const std::string &regExp,
-        const std::vector<internal::HttpConstraint> &filtersAndMethods =
+        const std::vector<internal::HttpConstraint> &constraints =
             std::vector<internal::HttpConstraint>{},
         const std::string &handlerName = "")
     {
         app().registerHandlerViaRegex(regExp,
                                       std::forward<FUNCTION>(function),
-                                      filtersAndMethods,
+                                      constraints,
                                       handlerName);
     }
 
@@ -132,14 +133,17 @@ class HttpController : public DrObject<T>, public HttpControllerBase
                 T::initPathRouting();
         }
     };
+
     // use static value to register controller method in framework before
     // main();
     static methodRegistrator registrator_;
+
     virtual void *touch()
     {
         return &registrator_;
     }
 };
+
 template <typename T, bool AutoCreation>
 typename HttpController<T, AutoCreation>::methodRegistrator
     HttpController<T, AutoCreation>::registrator_;

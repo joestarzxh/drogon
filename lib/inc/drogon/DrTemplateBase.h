@@ -1,7 +1,7 @@
 /**
  *
- *  DrTemplateBase.h
- *  An Tao
+ *  @file DrTemplateBase.h
+ *  @author An Tao
  *
  *  Copyright 2018, An Tao.  All rights reserved.
  *  https://github.com/an-tao/drogon
@@ -14,6 +14,7 @@
 
 #pragma once
 
+#include <drogon/exports.h>
 #include <drogon/DrObject.h>
 #include <drogon/HttpViewData.h>
 #include <memory>
@@ -29,7 +30,7 @@ using DrTemplateData = HttpViewData;
  * data.
  * For more details on the template file, see the wiki site (the 'View' section)
  */
-class DrTemplateBase : public virtual DrObjectBase
+class DROGON_EXPORT DrTemplateBase : public virtual DrObjectBase
 {
   public:
     /// Create an object of the implementation class
@@ -40,7 +41,7 @@ class DrTemplateBase : public virtual DrObjectBase
      * drogon_ctl tool to create c++ source files.
      */
     static std::shared_ptr<DrTemplateBase> newTemplate(
-        std::string templateName);
+        const std::string &templateName);
 
     /// Generate the text string
     /**

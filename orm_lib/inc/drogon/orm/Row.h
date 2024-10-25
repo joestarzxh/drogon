@@ -1,7 +1,7 @@
 /**
  *
- *  Row.h
- *  An Tao
+ *  @file Row.h
+ *  @author An Tao
  *
  *  Copyright 2018, An Tao.  All rights reserved.
  *  https://github.com/an-tao/drogon
@@ -17,8 +17,10 @@
 
 #pragma once
 
+#include <drogon/exports.h>
 #include <drogon/orm/Result.h>
 #include <string>
+
 namespace drogon
 {
 namespace orm
@@ -41,10 +43,10 @@ class ConstReverseRowIterator;
  * The row itself acts like a (non-modifyable) container, complete with its
  * own const_iterator and const_reverse_iterator.
  */
-class Row
+class DROGON_EXPORT Row
 {
   public:
-    using SizeType = unsigned long;
+    using SizeType = size_t;
     using Reference = Field;
     using ConstIterator = ConstRowIterator;
     using Iterator = ConstIterator;
@@ -53,6 +55,7 @@ class Row
     using DifferenceType = long;
 
     Reference operator[](SizeType index) const noexcept;
+    Reference operator[](int index) const noexcept;
     Reference operator[](const char columnName[]) const;
     Reference operator[](const std::string &columnName) const;
 
@@ -61,10 +64,12 @@ class Row
     Reference at(const std::string &columnName) const;
 
     SizeType size() const;
+
     SizeType capacity() const noexcept
     {
         return size();
     }
+
     ConstIterator begin() const noexcept;
     ConstIterator cbegin() const noexcept;
     ConstIterator end() const noexcept;
@@ -75,11 +80,16 @@ class Row
     ConstReverseIterator rend() const;
     ConstReverseIterator crend() const;
 
+#ifdef _MSC_VER
+    Row() noexcept = default;
+#endif
+
     Row(const Row &r) noexcept = default;
     Row(Row &&) noexcept = default;
+    Row &operator=(const Row &) noexcept = default;
 
   private:
-    const Result result_;
+    Result result_;
 
   protected:
     friend class Field;

@@ -10,8 +10,8 @@
 
 /**
  *
- *  Exception.cc
- *  An Tao
+ *  @file Exception.cc
+ *  @author An Tao
  *
  *  Copyright 2018, An Tao.  All rights reserved.
  *  https://github.com/an-tao/drogon
@@ -25,10 +25,6 @@
 #include <drogon/orm/Exception.h>
 
 using namespace drogon::orm;
-
-DrogonDbException::~DrogonDbException() noexcept
-{
-}
 
 Failure::Failure(const std::string &whatarg) : std::runtime_error(whatarg)
 {
@@ -46,7 +42,23 @@ BrokenConnection::BrokenConnection(const std::string &whatarg)
 SqlError::SqlError(const std::string &whatarg,
                    const std::string &Q,
                    const char sqlstate[])
-    : Failure(whatarg), query_(Q), sqlState_(sqlstate ? sqlstate : "")
+    : Failure(whatarg),
+      query_(Q),
+      sqlState_(sqlstate ? sqlstate : ""),
+      errcode_(0),
+      extendedErrcode_(0)
+{
+}
+
+SqlError::SqlError(const std::string &whatarg,
+                   const std::string &Q,
+                   const int errcode,
+                   const int extendedErrcode)
+    : Failure(whatarg),
+      query_(Q),
+      sqlState_(""),
+      errcode_(errcode),
+      extendedErrcode_(extendedErrcode)
 {
 }
 
@@ -62,6 +74,16 @@ const std::string &SqlError::query() const noexcept
 const std::string &SqlError::sqlState() const noexcept
 {
     return sqlState_;
+}
+
+int SqlError::errcode() const noexcept
+{
+    return errcode_;
+}
+
+int SqlError::extendedErrcode() const noexcept
+{
+    return extendedErrcode_;
 }
 
 InDoubtError::InDoubtError(const std::string &whatarg) : Failure(whatarg)
@@ -90,7 +112,11 @@ DeadlockDetected::DeadlockDetected(const std::string &whatarg)
 }
 
 InternalError::InternalError(const std::string &whatarg)
-    : logic_error("libpqxx internal error: " + whatarg)
+    : logic_error("drogon database internal error: " + whatarg)
+{
+}
+
+TimeoutError::TimeoutError(const std::string &whatarg) : logic_error(whatarg)
 {
 }
 

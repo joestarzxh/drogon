@@ -1,7 +1,7 @@
 /**
  *
- *  create.cc
- *  An Tao
+ *  @file create.cc
+ *  @author An Tao
  *
  *  Copyright 2018, An Tao.  All rights reserved.
  *  https://github.com/an-tao/drogon
@@ -18,13 +18,15 @@
 #include <iostream>
 #include <memory>
 using namespace drogon_ctl;
+
 std::string create::detail()
 {
     return "Use create command to create some source files of drogon webapp\n\n"
            "Usage:drogon_ctl create <view|controller|filter|project|model> "
            "[-options] <object name>\n\n"
-           "drogon_ctl create view <csp file name> [-o <output path>]//create "
-           "HttpView source files from csp file\n\n"
+           "drogon_ctl create view <csp file name> [-o <output path>] [-n "
+           "<namespace>] [--path-to-namespace] //create HttpView source files "
+           "from csp files, namespace is prefixed of path-to-namespace\n\n"
            "drogon_ctl create controller [-s] <[namespace::]class_name> //"
            "create HttpSimpleController source files\n\n"
            "drogon_ctl create controller -h <[namespace::]class_name> //"

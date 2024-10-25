@@ -1,77 +1,61 @@
 link_libraries(${PROJECT_NAME})
 
-file(GLOB SCP_LIST ${CMAKE_CURRENT_SOURCE_DIR}/simple_example/*.csp)
-foreach(cspFile ${SCP_LIST})
-  message(STATUS "cspFile:" ${cspFile})
-  get_filename_component(classname ${cspFile} NAME_WE)
-  message(STATUS "view classname:" ${classname})
-  add_custom_command(OUTPUT ${classname}.h ${classname}.cc
-                     COMMAND drogon_ctl
-                             ARGS
-                             create
-                             view
-                             ${cspFile}
-                     DEPENDS ${cspFile}
-                     VERBATIM)
-  set(VIEWSRC ${VIEWSRC} ${classname}.cc)
-endforeach()
-
-set(simple_example_sources
-    simple_example/CustomCtrl.cc
-    simple_example/CustomHeaderFilter.cc
-    simple_example/DoNothingPlugin.cc
-    simple_example/ForwardCtrl.cc
-    simple_example/JsonTestController.cc
-    simple_example/ListParaCtl.cc
-    simple_example/PipeliningTest.cc
-    simple_example/TestController.cc
-    simple_example/TestPlugin.cc
-    simple_example/TestViewCtl.cc
-    simple_example/WebSocketTest.cc
-    simple_example/api_Attachment.cc
-    simple_example/api_v1_ApiTest.cc
-    simple_example/TimeFilter.cc
-    simple_example/DigestAuthFilter.cc
-    simple_example/main.cc)
-
-add_executable(webapp ${simple_example_sources} ${VIEWSRC})
-add_dependencies(webapp drogon_ctl)
-
-set(client_example_sources client_example/main.cc)
 set(benchmark_sources benchmark/BenchmarkCtrl.cc benchmark/JsonCtrl.cc
                       benchmark/main.cc)
-# AUX_SOURCE_DIRECTORY(simple_example_test DIR_TEST)
 
-add_executable(client ${client_example_sources})
+add_executable(client client_example/main.cc)
+add_executable(websocket_client websocket_client/WebSocketClient.cc)
+add_executable(websocket_server websocket_server/WebSocketServer.cc)
 add_executable(benchmark ${benchmark_sources})
-add_executable(webapp_test simple_example_test/main.cc)
-add_executable(pipelining_test simple_example_test/HttpPipeliningTest.cc)
-add_executable(websocket_test simple_example_test/WebSocketTest.cc)
-add_executable(multiple_ws_test simple_example_test/MultipleWsTest.cc)
+add_executable(helloworld helloworld/main.cc
+                          helloworld/HelloController.cc
+                          helloworld/HelloViewController.cc)
+drogon_create_views(helloworld
+                    ${CMAKE_CURRENT_SOURCE_DIR}/helloworld
+                    ${CMAKE_CURRENT_BINARY_DIR})
+add_executable(file_upload file_upload/file_upload.cc)
+drogon_create_views(file_upload
+                    ${CMAKE_CURRENT_SOURCE_DIR}/file_upload
+                    ${CMAKE_CURRENT_BINARY_DIR})
+add_executable(login_session login_session/main.cc)
+drogon_create_views(login_session
+                    ${CMAKE_CURRENT_SOURCE_DIR}/login_session
+                    ${CMAKE_CURRENT_BINARY_DIR})
 
-add_custom_command(
-  TARGET webapp POST_BUILD
-  COMMAND ${CMAKE_COMMAND}
-          -E
-          copy_if_different
-          ${PROJECT_SOURCE_DIR}/config.example.json
-          ${PROJECT_SOURCE_DIR}/drogon.jpg
-          ${CMAKE_CURRENT_SOURCE_DIR}/simple_example/index.html
-          ${CMAKE_CURRENT_SOURCE_DIR}/simple_example/index.html.gz
-          ${PROJECT_SOURCE_DIR}/trantor/trantor/tests/server.pem
-          $<TARGET_FILE_DIR:webapp>)
+add_executable(jsonstore jsonstore/main.cc)
+
+add_executable(redis_simple redis/main.cc
+                            redis/controllers/Client.cc
+                            redis/controllers/WsClient.cc)
+
+add_executable(redis_chat redis_chat/main.cc
+                          redis_chat/controllers/Chat.cc)
+
+add_executable(async_stream async_stream/main.cc
+                            async_stream/RequestStreamExampleCtrl.cc)
 
 set(example_targets
-    webapp
-    webapp_test
-    client
     benchmark
-    pipelining_test
-    websocket_test
-    multiple_ws_test)
+    client
+    websocket_client
+    websocket_server
+    helloworld
+    file_upload
+    login_session
+    jsonstore
+    redis_simple
+    redis_chat
+    async_stream)
+
+# Add warnings for our example targets--some warnings (such as -Wunused-parameter) only appear
+# when the templated functions are instantiated at their point of use.
+if(NOT ${CMAKE_PLATFORM_NAME} STREQUAL "Windows" AND CMAKE_CXX_COMPILER_ID MATCHES GNU)
+    foreach(target ${example_targets})
+        target_compile_options(${target} PRIVATE -Wall -Wextra -Werror)
+    endforeach()
+endif()
 
 set_property(TARGET ${example_targets}
              PROPERTY CXX_STANDARD ${DROGON_CXX_STANDARD})
 set_property(TARGET ${example_targets} PROPERTY CXX_STANDARD_REQUIRED ON)
 set_property(TARGET ${example_targets} PROPERTY CXX_EXTENSIONS OFF)
-set_property(TARGET webapp PROPERTY ENABLE_EXPORTS ON)

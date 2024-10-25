@@ -1,7 +1,7 @@
 /**
  *
- *  SharedLibManager.cc
- *  An Tao
+ *  @file SharedLibManager.cc
+ *  @author An Tao
  *
  *  Copyright 2018, An Tao.  All rights reserved.
  *  https://github.com/an-tao/drogon
@@ -20,6 +20,7 @@
 #include <sys/types.h>
 #include <trantor/utils/Logger.h>
 #include <unistd.h>
+
 static void forEachFileIn(
     const std::string &path,
     const std::function<void(const std::string &, const struct stat &)> &cb)
@@ -70,23 +71,29 @@ static void forEachFileIn(
 }
 
 using namespace drogon;
+
 SharedLibManager::SharedLibManager(const std::vector<std::string> &libPaths,
                                    const std::string &outputPath)
     : libPaths_(libPaths), outputPath_(outputPath)
 {
     workingThread_.run();
-    timeId_ = workingThread_.getLoop()->runEvery(5.0, [=]() { managerLibs(); });
+    timeId_ =
+        workingThread_.getLoop()->runEvery(5.0, [this]() { managerLibs(); });
 }
+
 SharedLibManager::~SharedLibManager()
 {
     workingThread_.getLoop()->invalidateTimer(timeId_);
 }
+
 void SharedLibManager::managerLibs()
 {
     for (auto const &libPath : libPaths_)
     {
         forEachFileIn(
-            libPath, [=](const std::string &filename, const struct stat &st) {
+            libPath,
+            [this, libPath](const std::string &filename,
+                            const struct stat &st) {
                 auto pos = filename.rfind('.');
                 if (pos != std::string::npos)
                 {
@@ -104,15 +111,14 @@ void SharedLibManager::managerLibs()
                         void *oldHandle = nullptr;
                         if (dlMap_.find(filename) != dlMap_.end())
                         {
-#ifdef __linux__
+#if defined __linux__ || defined __HAIKU__
                             if (st.st_mtim.tv_sec >
                                 dlMap_[filename].mTime.tv_sec)
 #elif defined _WIN32
-                            if (st.st_mtime >
-                                dlMap_[filename].mTime.tv_sec)
+                            if (st.st_mtime > dlMap_[filename].mTime.tv_sec)
 #else
-                          if (st.st_mtimespec.tv_sec >
-                              dlMap_[filename].mTime.tv_sec)
+                            if (st.st_mtimespec.tv_sec >
+                                dlMap_[filename].mTime.tv_sec)
 #endif
                             {
                                 LOG_TRACE << "new csp file:" << filename;
@@ -166,12 +172,12 @@ void SharedLibManager::managerLibs()
                             dlStat.handle =
                                 compileAndLoadLib(srcFile, oldHandle);
                         }
-#ifdef __linux__
+#if defined __linux__ || defined __HAIKU__
                         dlStat.mTime = st.st_mtim;
 #elif defined _WIN32
-                            dlStat.mTime.tv_sec = st.st_mtime;
+                        dlStat.mTime.tv_sec = st.st_mtime;
 #else
-                            dlStat.mTime = st.st_mtimespec;
+                        dlStat.mTime = st.st_mtimespec;
 #endif
                         if (dlStat.handle)
                         {
@@ -182,7 +188,7 @@ void SharedLibManager::managerLibs()
                             dlStat.handle = dlMap_[filename].handle;
                             dlMap_[filename] = dlStat;
                         }
-                        workingThread_.getLoop()->runAfter(3.5, [=]() {
+                        workingThread_.getLoop()->runAfter(3.5, [lockFile]() {
                             LOG_TRACE << "remove file " << lockFile;
                             if (unlink(lockFile.c_str()) == -1)
                                 perror("");
@@ -198,11 +204,6 @@ void *SharedLibManager::compileAndLoadLib(const std::string &sourceFile,
 {
     LOG_TRACE << "src:" << sourceFile;
     std::string cmd = COMPILER_COMMAND;
-    auto pos = cmd.rfind('/');
-    if (pos != std::string::npos)
-    {
-        cmd = cmd.substr(pos + 1);
-    }
     cmd.append(" ")
         .append(sourceFile)
         .append(" ")
@@ -213,7 +214,7 @@ void *SharedLibManager::compileAndLoadLib(const std::string &sourceFile,
         cmd.append(" -shared -fPIC -undefined dynamic_lookup -o ");
     else
         cmd.append(" -shared -fPIC --no-gnu-unique -o ");
-    pos = sourceFile.rfind('.');
+    auto pos = sourceFile.rfind('.');
     auto soFile = sourceFile.substr(0, pos);
     soFile.append(".so");
     cmd.append(soFile);
@@ -234,7 +235,7 @@ void *SharedLibManager::compileAndLoadLib(const std::string &sourceFile,
 bool SharedLibManager::shouldCompileLib(const std::string &soFile,
                                         const struct stat &sourceStat)
 {
-#ifdef __linux__
+#if defined __linux__ || defined __HAIKU__
     auto sourceModifiedTime = sourceStat.st_mtim.tv_sec;
 #elif defined _WIN32
     auto sourceModifiedTime = sourceStat.st_mtime;
@@ -249,7 +250,7 @@ bool SharedLibManager::shouldCompileLib(const std::string &soFile,
         return true;
     }
 
-#ifdef __linux__
+#if defined __linux__ || defined __HAIKU__
     auto soModifiedTime = soStat.st_mtim.tv_sec;
 #elif defined _WIN32
     auto soModifiedTime = soStat.st_mtime;

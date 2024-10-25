@@ -36,12 +36,83 @@
 
 using namespace std::chrono_literals;
 using namespace drogon_ctl;
+
 static std::string toLower(const std::string &str)
 {
     auto ret = str;
-    std::transform(ret.begin(), ret.end(), ret.begin(), tolower);
+    std::transform(ret.begin(), ret.end(), ret.begin(), [](unsigned char c) {
+        return tolower(c);
+    });
     return ret;
 }
+
+static std::string escapeConnString(const std::string &str)
+{
+    bool beQuoted = str.empty() || (str.find(' ') != std::string::npos);
+
+    std::string escaped;
+    escaped.reserve(str.size());
+    for (auto ch : str)
+    {
+        if (ch == '\'')
+            escaped.push_back('\\');
+        else if (ch == '\\')
+            escaped.push_back('\\');
+        escaped.push_back(ch);
+    }
+
+    if (beQuoted)
+        return "'" + escaped + "'";
+    return escaped;
+}
+
+std::string drogon_ctl::escapeIdentifier(const std::string &identifier,
+                                         const std::string &rdbms)
+{
+    if (rdbms != "postgresql")
+    {
+        return identifier;
+    }
+
+    return "\\\"" + identifier + "\\\"";
+}
+
+static std::map<std::string, std::vector<ConvertMethod>> getConvertMethods(
+    const Json::Value &convertColumns)
+{
+    std::map<std::string, std::vector<ConvertMethod>> ret;
+    auto enabled = convertColumns.get("enabled", false).asBool();
+    if (!enabled)
+    {
+        return ret;
+    }  // endif
+    auto items = convertColumns["items"];
+    if (items.isNull())
+    {
+        return ret;
+    }  // endif
+    if (!items.isArray())
+    {
+        std::cerr << "items of convert must be an array" << std::endl;
+        exit(1);
+    }  // endif
+    for (auto &convertColumn : items)
+    {
+        try
+        {
+            ConvertMethod c(convertColumn);
+            ret[c.tableName()].push_back(c);
+        }  // try
+        catch (const std::runtime_error &e)
+        {
+            std::cerr << e.what() << std::endl;
+            exit(1);
+        }  // catch
+    }      // for
+
+    return ret;
+}
+
 static std::map<std::string, std::vector<Relationship>> getRelationships(
     const Json::Value &relationships)
 {
@@ -80,6 +151,19 @@ static std::map<std::string, std::vector<Relationship>> getRelationships(
     return ret;
 }
 
+bool drogon_ctl::ConvertMethod::shouldConvert(const std::string &tableName,
+                                              const std::string &colName) const
+{
+    if (tableName == "*")
+    {
+        return colName == colName_;
+    }
+    else
+    {
+        return (tableName == tableName_ && colName == colName_);
+    }  // endif
+}
+
 #if USE_POSTGRESQL
 void create_model::createModelClassFromPG(
     const std::string &path,
@@ -87,26 +171,28 @@ void create_model::createModelClassFromPG(
     const std::string &tableName,
     const std::string &schema,
     const Json::Value &restfulApiConfig,
-    const std::vector<Relationship> &relationships)
+    const std::vector<Relationship> &relationships,
+    const std::vector<ConvertMethod> &convertMethods)
 {
     auto className = nameTransform(tableName, true);
     HttpViewData data;
     data["className"] = className;
-    data["tableName"] = toLower(tableName);
+    data["tableName"] = tableName;
     data["hasPrimaryKey"] = (int)0;
     data["primaryKeyName"] = "";
     data["dbName"] = dbname_;
     data["rdbms"] = std::string("postgresql");
     data["relationships"] = relationships;
+    data["convertMethods"] = convertMethods;
     if (schema != "public")
     {
         data["schema"] = schema;
     }
     std::vector<ColumnInfo> cols;
-    *client << "SELECT * \
-                FROM information_schema.columns \
-                WHERE table_schema = $1 \
-                AND table_name   = $2"
+    *client << "SELECT * "
+               "FROM information_schema.columns "
+               "WHERE table_schema = $1 "
+               "AND table_name   = $2"
             << schema << tableName << Mode::Blocking >>
         [&](const Result &r) {
             if (r.size() == 0)
@@ -140,9 +226,7 @@ void create_model::createModelClassFromPG(
                     info.colType_ = "int32_t";
                     info.colLength_ = 4;
                 }
-                else if (type == "bigint" ||
-                         type == "numeric")  /// TODO:Use int64 to represent
-                                             /// numeric type?
+                else if (type == "bigint")
                 {
                     info.colType_ = "int64_t";
                     info.colLength_ = 8;
@@ -181,6 +265,10 @@ void create_model::createModelClassFromPG(
                 {
                     info.colType_ = "std::vector<char>";
                 }
+                else if (type.find("numeric") != std::string::npos)
+                {
+                    info.colType_ = "std::string";
+                }
                 else
                 {
                     info.colType_ = "std::string";
@@ -207,14 +295,14 @@ void create_model::createModelClassFromPG(
             exit(1);
         };
     size_t pkNumber = 0;
-    *client << "SELECT \
-                pg_constraint.conname AS pk_name,\
-                pg_constraint.conkey AS pk_vector \
-                FROM pg_constraint \
-                INNER JOIN pg_class ON pg_constraint.conrelid = pg_class.oid \
-                WHERE \
-                pg_class.relname = $1 \
-                AND pg_constraint.contype = 'p'"
+    *client << "SELECT "
+               "pg_constraint.conname AS pk_name,"
+               "pg_constraint.conkey AS pk_vector "
+               "FROM pg_constraint "
+               "INNER JOIN pg_class ON pg_constraint.conrelid = pg_class.oid "
+               "WHERE "
+               "pg_class.relname = $1 "
+               "AND pg_constraint.contype = 'p'"
             << tableName << Mode::Blocking >>
         [&](bool isNull,
             const std::string &pkName,
@@ -231,16 +319,18 @@ void create_model::createModelClassFromPG(
     data["hasPrimaryKey"] = (int)pkNumber;
     if (pkNumber == 1)
     {
-        *client << "SELECT \
-                pg_attribute.attname AS colname,\
-                pg_type.typname AS typename,\
-                pg_constraint.contype AS contype \
-                FROM pg_constraint \
-                INNER JOIN pg_class ON pg_constraint.conrelid = pg_class.oid \
-                INNER JOIN pg_attribute ON pg_attribute.attrelid = pg_class.oid \
-                AND pg_attribute.attnum = pg_constraint.conkey [ 1 ] \
-                INNER JOIN pg_type ON pg_type.oid = pg_attribute.atttypid \
-                WHERE pg_class.relname = $1 and pg_constraint.contype='p'"
+        *client << "SELECT "
+                   "pg_attribute.attname AS colname,"
+                   "pg_type.typname AS typename,"
+                   "pg_constraint.contype AS contype "
+                   "FROM pg_constraint "
+                   "INNER JOIN pg_class ON pg_constraint.conrelid = "
+                   "pg_class.oid "
+                   "INNER JOIN pg_attribute ON pg_attribute.attrelid = "
+                   "pg_class.oid "
+                   "AND pg_attribute.attnum = pg_constraint.conkey [ 1 ] "
+                   "INNER JOIN pg_type ON pg_type.oid = pg_attribute.atttypid "
+                   "WHERE pg_class.relname = $1 and pg_constraint.contype='p'"
                 << tableName << Mode::Blocking >>
             [&](bool isNull,
                 const std::string &colName,
@@ -268,16 +358,20 @@ void create_model::createModelClassFromPG(
         std::vector<std::string> pkNames, pkTypes, pkValNames;
         for (size_t i = 1; i <= pkNumber; ++i)
         {
-            *client << "SELECT \
-                pg_attribute.attname AS colname,\
-                pg_type.typname AS typename,\
-                pg_constraint.contype AS contype \
-                FROM pg_constraint \
-                INNER JOIN pg_class ON pg_constraint.conrelid = pg_class.oid \
-                INNER JOIN pg_attribute ON pg_attribute.attrelid = pg_class.oid \
-                AND pg_attribute.attnum = pg_constraint.conkey [ $1 ] \
-                INNER JOIN pg_type ON pg_type.oid = pg_attribute.atttypid \
-                WHERE pg_class.relname = $2 and pg_constraint.contype='p'"
+            *client << "SELECT "
+                       "pg_attribute.attname AS colname,"
+                       "pg_type.typname AS typename,"
+                       "pg_constraint.contype AS contype "
+                       "FROM pg_constraint "
+                       "INNER JOIN pg_class ON pg_constraint.conrelid = "
+                       "pg_class.oid "
+                       "INNER JOIN pg_attribute ON pg_attribute.attrelid = "
+                       "pg_class.oid "
+                       "AND pg_attribute.attnum = pg_constraint.conkey [ $1 ] "
+                       "INNER JOIN pg_type ON pg_type.oid = "
+                       "pg_attribute.atttypid "
+                       "WHERE pg_class.relname = $2 and "
+                       "pg_constraint.contype='p'"
                     << (int)i << tableName << Mode::Blocking >>
                 [&](bool isNull, std::string colName, const std::string &type) {
                     if (isNull)
@@ -313,12 +407,14 @@ void create_model::createModelClassFromPG(
     sourceFile << templ->genText(data);
     createRestfulAPIController(data, restfulApiConfig);
 }
+
 void create_model::createModelFromPG(
     const std::string &path,
     const DbClientPtr &client,
     const std::string &schema,
     const Json::Value &restfulApiConfig,
-    std::map<std::string, std::vector<Relationship>> &relationships)
+    std::map<std::string, std::vector<Relationship>> &relationships,
+    std::map<std::string, std::vector<ConvertMethod>> &convertMethods)
 {
     *client << "SELECT a.oid,"
                "a.relname AS name,"
@@ -343,7 +439,8 @@ void create_model::createModelFromPG(
                                        tableName,
                                        schema,
                                        restfulApiConfig,
-                                       relationships[tableName]);
+                                       relationships[tableName],
+                                       convertMethods[tableName]);
             }
         } >>
         [](const DrogonDbException &e) {
@@ -359,7 +456,8 @@ void create_model::createModelClassFromMysql(
     const DbClientPtr &client,
     const std::string &tableName,
     const Json::Value &restfulApiConfig,
-    const std::vector<Relationship> &relationships)
+    const std::vector<Relationship> &relationships,
+    const std::vector<ConvertMethod> &convertMethods)
 {
     auto className = nameTransform(tableName, true);
     HttpViewData data;
@@ -370,9 +468,10 @@ void create_model::createModelClassFromMysql(
     data["dbName"] = dbname_;
     data["rdbms"] = std::string("mysql");
     data["relationships"] = relationships;
+    data["convertMethods"] = convertMethods;
     std::vector<ColumnInfo> cols;
     int i = 0;
-    *client << "desc " + tableName << Mode::Blocking >>
+    *client << "desc `" + tableName + "`" << Mode::Blocking >>
         [&i, &cols](bool isNull,
                     const std::string &field,
                     const std::string &type,
@@ -400,6 +499,11 @@ void create_model::createModelClassFromMysql(
                 {
                     info.colType_ = "int16_t";
                     info.colLength_ = 2;
+                }
+                else if (type.find("mediumint") == 0)
+                {
+                    info.colType_ = "int32_t";
+                    info.colLength_ = 3;
                 }
                 else if (type.find("int") == 0)
                 {
@@ -446,7 +550,8 @@ void create_model::createModelClassFromMysql(
                 {
                     info.colType_ = "std::string";
                 }
-                if (type.find("unsigned") != std::string::npos)
+                if (type.find("unsigned") != std::string::npos &&
+                    info.colType_ != "std::string")
                 {
                     info.colType_ = "u" + info.colType_;
                 }
@@ -466,12 +571,13 @@ void create_model::createModelClassFromMysql(
             std::cerr << e.base().what() << std::endl;
             exit(1);
         };
-    std::vector<std::string> pkNames, pkTypes;
+    std::vector<std::string> pkNames, pkTypes, pkValNames;
     for (auto const &col : cols)
     {
         if (col.isPrimaryKey_)
         {
             pkNames.push_back(col.colName_);
+            pkValNames.push_back(nameTransform(col.colName_, false));
             pkTypes.push_back(col.colType_);
         }
     }
@@ -485,6 +591,7 @@ void create_model::createModelClassFromMysql(
     {
         data["primaryKeyName"] = pkNames;
         data["primaryKeyType"] = pkTypes;
+        data["primaryKeyValNames"] = pkValNames;
     }
     data["columns"] = cols;
     std::ofstream headerFile(path + "/" + className + ".h", std::ofstream::out);
@@ -496,11 +603,13 @@ void create_model::createModelClassFromMysql(
     sourceFile << templ->genText(data);
     createRestfulAPIController(data, restfulApiConfig);
 }
+
 void create_model::createModelFromMysql(
     const std::string &path,
     const DbClientPtr &client,
     const Json::Value &restfulApiConfig,
-    std::map<std::string, std::vector<Relationship>> &relationships)
+    std::map<std::string, std::vector<Relationship>> &relationships,
+    std::map<std::string, std::vector<ConvertMethod>> &convertMethods)
 {
     *client << "show tables" << Mode::Blocking >> [&](bool isNull,
                                                       std::string &&tableName) {
@@ -511,7 +620,8 @@ void create_model::createModelFromMysql(
                                       client,
                                       tableName,
                                       restfulApiConfig,
-                                      relationships[tableName]);
+                                      relationships[tableName],
+                                      convertMethods[tableName]);
         }
     } >> [](const DrogonDbException &e) {
         std::cerr << e.base().what() << std::endl;
@@ -525,7 +635,8 @@ void create_model::createModelClassFromSqlite3(
     const DbClientPtr &client,
     const std::string &tableName,
     const Json::Value &restfulApiConfig,
-    const std::vector<Relationship> &relationships)
+    const std::vector<Relationship> &relationships,
+    const std::vector<ConvertMethod> &convertMethods)
 {
     HttpViewData data;
     auto className = nameTransform(tableName, true);
@@ -536,6 +647,7 @@ void create_model::createModelClassFromSqlite3(
     data["dbName"] = std::string("sqlite3");
     data["rdbms"] = std::string("sqlite3");
     data["relationships"] = relationships;
+    data["convertMethods"] = convertMethods;
     std::vector<ColumnInfo> cols;
     std::string sql = "PRAGMA table_info(" + tableName + ");";
     *client << sql << Mode::Blocking >> [&](const Result &result) {
@@ -543,9 +655,12 @@ void create_model::createModelClassFromSqlite3(
         for (auto &row : result)
         {
             bool notnull = row["notnull"].as<bool>();
-            bool primary = row["pk"].as<bool>();
+            bool primary = row["pk"].as<int>();
             auto type = row["type"].as<std::string>();
-            std::transform(type.begin(), type.end(), type.begin(), tolower);
+            std::transform(type.begin(),
+                           type.end(),
+                           type.begin(),
+                           [](unsigned char c) { return tolower(c); });
             ColumnInfo info;
             info.index_ = index++;
             info.dbType_ = "sqlite3";
@@ -557,25 +672,35 @@ void create_model::createModelClassFromSqlite3(
             info.isPrimaryKey_ = primary;
             if (primary)
             {
-                *client << "SELECT sql FROM sqlite_master WHERE name=? and "
-                           "(type='table' or type='view');"
-                        << tableName << Mode::Blocking >>
-                    [&](bool isNull, std::string sql) {
-                        if (!isNull)
-                        {
-                            std::transform(sql.begin(),
-                                           sql.end(),
-                                           sql.begin(),
-                                           tolower);
-                            if (sql.find("autoincrement") != std::string::npos)
+                if (type == "integer")
+                {
+                    info.isAutoVal_ = true;
+                }
+                else
+                {
+                    *client << "SELECT sql FROM sqlite_master WHERE name=? and "
+                               "(type='table' or type='view');"
+                            << tableName << Mode::Blocking >>
+                        [&](bool isNull, std::string sql) {
+                            if (!isNull)
                             {
-                                info.isAutoVal_ = true;
+                                std::transform(sql.begin(),
+                                               sql.end(),
+                                               sql.begin(),
+                                               [](unsigned char c) {
+                                                   return tolower(c);
+                                               });
+                                if (sql.find("autoincrement") !=
+                                    std::string::npos)
+                                {
+                                    info.isAutoVal_ = true;
+                                }
                             }
-                        }
-                    } >>
-                    [](const DrogonDbException &e) {
+                        } >>
+                        [](const DrogonDbException &e) {
 
-                    };
+                        };
+                }
             }
             auto defaultVal = row["dflt_value"].as<std::string>();
             if (!defaultVal.empty())
@@ -585,7 +710,7 @@ void create_model::createModelClassFromSqlite3(
 
             if (type.find("int") != std::string::npos)
             {
-                info.colType_ = "uint64_t";
+                info.colType_ = "int64_t";
                 info.colLength_ = 8;
             }
             else if (type.find("char") != std::string::npos || type == "text" ||
@@ -608,6 +733,10 @@ void create_model::createModelClassFromSqlite3(
             {
                 info.colType_ = "std::vector<char>";
             }
+            else if (type == "datetime" || type == "date")
+            {
+                info.colType_ = "::trantor::Date";
+            }
             else
             {
                 info.colType_ = "std::string";
@@ -618,13 +747,14 @@ void create_model::createModelClassFromSqlite3(
         std::cerr << e.base().what() << std::endl;
         exit(1);
     };
-    std::vector<std::string> pkNames, pkTypes;
+    std::vector<std::string> pkNames, pkTypes, pkValNames;
     for (auto const &col : cols)
     {
         if (col.isPrimaryKey_)
         {
             pkNames.push_back(col.colName_);
             pkTypes.push_back(col.colType_);
+            pkValNames.push_back(nameTransform(col.colName_, false));
         }
     }
     data["hasPrimaryKey"] = (int)pkNames.size();
@@ -635,8 +765,14 @@ void create_model::createModelClassFromSqlite3(
     }
     else if (pkNames.size() > 1)
     {
+        for (auto &col : cols)
+        {
+            col.isAutoVal_ = false;
+        }
+
         data["primaryKeyName"] = pkNames;
         data["primaryKeyType"] = pkTypes;
+        data["primaryKeyValNames"] = pkValNames;
     }
     data["columns"] = cols;
     std::ofstream headerFile(path + "/" + className + ".h", std::ofstream::out);
@@ -653,7 +789,8 @@ void create_model::createModelFromSqlite3(
     const std::string &path,
     const DbClientPtr &client,
     const Json::Value &restfulApiConfig,
-    std::map<std::string, std::vector<Relationship>> &relationships)
+    std::map<std::string, std::vector<Relationship>> &relationships,
+    std::map<std::string, std::vector<ConvertMethod>> &convertMethods)
 {
     *client << "SELECT name FROM sqlite_master WHERE name!='sqlite_sequence' "
                "and (type='table' or type='view') ORDER BY name;"
@@ -666,7 +803,8 @@ void create_model::createModelFromSqlite3(
                                             client,
                                             tableName,
                                             restfulApiConfig,
-                                            relationships[tableName]);
+                                            relationships[tableName],
+                                            convertMethods[tableName]);
             }
         } >>
         [](const DrogonDbException &e) {
@@ -681,9 +819,13 @@ void create_model::createModel(const std::string &path,
                                const std::string &singleModelName)
 {
     auto dbType = config.get("rdbms", "no dbms").asString();
-    std::transform(dbType.begin(), dbType.end(), dbType.begin(), tolower);
+    std::transform(dbType.begin(),
+                   dbType.end(),
+                   dbType.begin(),
+                   [](unsigned char c) { return tolower(c); });
     auto restfulApiConfig = config["restful_api_controllers"];
     auto relationships = getRelationships(config["relationships"]);
+    auto convertMethods = getConvertMethods(config["convert"]);
     if (dbType == "postgresql")
     {
 #if USE_POSTGRESQL
@@ -713,20 +855,20 @@ void create_model::createModel(const std::string &path,
 
         auto connStr =
             utils::formattedString("host=%s port=%u dbname=%s user=%s",
-                                   host.c_str(),
+                                   escapeConnString(host).c_str(),
                                    port,
-                                   dbname.c_str(),
-                                   user.c_str());
+                                   escapeConnString(dbname).c_str(),
+                                   escapeConnString(user).c_str());
         if (!password.empty())
         {
             connStr += " password=";
-            connStr += password;
+            connStr += escapeConnString(password);
         }
         auto characterSet = config.get("client_encoding", "").asString();
         if (!characterSet.empty())
         {
             connStr += " client_encoding=";
-            connStr += characterSet;
+            connStr += escapeConnString(characterSet);
         }
 
         auto schema = config.get("schema", "public").asString();
@@ -753,8 +895,12 @@ void create_model::createModel(const std::string &path,
         {
             auto tables = config["tables"];
             if (!tables || tables.size() == 0)
-                createModelFromPG(
-                    path, client, schema, restfulApiConfig, relationships);
+                createModelFromPG(path,
+                                  client,
+                                  schema,
+                                  restfulApiConfig,
+                                  relationships,
+                                  convertMethods);
             else
             {
                 for (int i = 0; i < (int)tables.size(); ++i)
@@ -763,14 +909,15 @@ void create_model::createModel(const std::string &path,
                     std::transform(tableName.begin(),
                                    tableName.end(),
                                    tableName.begin(),
-                                   tolower);
+                                   [](unsigned char c) { return tolower(c); });
                     std::cout << "table name:" << tableName << std::endl;
                     createModelClassFromPG(path,
                                            client,
                                            tableName,
                                            schema,
                                            restfulApiConfig,
-                                           relationships[tableName]);
+                                           relationships[tableName],
+                                           convertMethods[tableName]);
                 }
             }
         }
@@ -781,7 +928,8 @@ void create_model::createModel(const std::string &path,
                                    singleModelName,
                                    schema,
                                    restfulApiConfig,
-                                   relationships[singleModelName]);
+                                   relationships[singleModelName],
+                                   convertMethods[singleModelName]);
         }
 #else
         std::cerr
@@ -819,20 +967,20 @@ void create_model::createModel(const std::string &path,
 
         auto connStr =
             utils::formattedString("host=%s port=%u dbname=%s user=%s",
-                                   host.c_str(),
+                                   escapeConnString(host).c_str(),
                                    port,
-                                   dbname.c_str(),
-                                   user.c_str());
+                                   escapeConnString(dbname).c_str(),
+                                   escapeConnString(user).c_str());
         if (!password.empty())
         {
             connStr += " password=";
-            connStr += password;
+            connStr += escapeConnString(password);
         }
         auto characterSet = config.get("client_encoding", "").asString();
         if (!characterSet.empty())
         {
             connStr += " client_encoding=";
-            connStr += characterSet;
+            connStr += escapeConnString(characterSet);
         }
         DbClientPtr client = drogon::orm::DbClient::newMysqlClient(connStr, 1);
         std::cout << "Connect to server..." << std::endl;
@@ -860,7 +1008,8 @@ void create_model::createModel(const std::string &path,
                 createModelFromMysql(path,
                                      client,
                                      restfulApiConfig,
-                                     relationships);
+                                     relationships,
+                                     convertMethods);
             else
             {
                 for (int i = 0; i < (int)tables.size(); ++i)
@@ -869,13 +1018,14 @@ void create_model::createModel(const std::string &path,
                     std::transform(tableName.begin(),
                                    tableName.end(),
                                    tableName.begin(),
-                                   tolower);
+                                   [](unsigned char c) { return tolower(c); });
                     std::cout << "table name:" << tableName << std::endl;
                     createModelClassFromMysql(path,
                                               client,
                                               tableName,
                                               restfulApiConfig,
-                                              relationships[tableName]);
+                                              relationships[tableName],
+                                              convertMethods[tableName]);
                 }
             }
         }
@@ -885,7 +1035,8 @@ void create_model::createModel(const std::string &path,
                                       client,
                                       singleModelName,
                                       restfulApiConfig,
-                                      relationships[singleModelName]);
+                                      relationships[singleModelName],
+                                      convertMethods[singleModelName]);
         }
 
 #else
@@ -904,7 +1055,7 @@ void create_model::createModel(const std::string &path,
                       << "/model.json " << std::endl;
             exit(1);
         }
-        std::string connStr = "filename=" + filename;
+        std::string connStr = "filename=" + escapeConnString(filename);
         DbClientPtr client =
             drogon::orm::DbClient::newSqlite3Client(connStr, 1);
         std::cout << "Connect..." << std::endl;
@@ -932,7 +1083,8 @@ void create_model::createModel(const std::string &path,
                 createModelFromSqlite3(path,
                                        client,
                                        restfulApiConfig,
-                                       relationships);
+                                       relationships,
+                                       convertMethods);
             else
             {
                 for (int i = 0; i < (int)tables.size(); ++i)
@@ -941,13 +1093,14 @@ void create_model::createModel(const std::string &path,
                     std::transform(tableName.begin(),
                                    tableName.end(),
                                    tableName.begin(),
-                                   tolower);
+                                   [](unsigned char c) { return tolower(c); });
                     std::cout << "table name:" << tableName << std::endl;
                     createModelClassFromSqlite3(path,
                                                 client,
                                                 tableName,
                                                 restfulApiConfig,
-                                                relationships[tableName]);
+                                                relationships[tableName],
+                                                convertMethods[tableName]);
                 }
             }
         }
@@ -957,7 +1110,8 @@ void create_model::createModel(const std::string &path,
                                         client,
                                         singleModelName,
                                         restfulApiConfig,
-                                        relationships[singleModelName]);
+                                        relationships[singleModelName],
+                                        convertMethods[singleModelName]);
         }
 
 #else
@@ -978,6 +1132,7 @@ void create_model::createModel(const std::string &path,
         exit(1);
     }
 }
+
 void create_model::createModel(const std::string &path,
                                const std::string &singleModelName)
 {
@@ -1080,7 +1235,10 @@ void create_model::createRestfulAPIController(
         restfulApiConfig.get("resource_uri", "/*").asString(),
         regex,
         modelClassName);
-    std::transform(resource.begin(), resource.end(), resource.begin(), tolower);
+    std::transform(resource.begin(),
+                   resource.end(),
+                   resource.begin(),
+                   [](unsigned char c) { return tolower(c); });
     auto ctrlClassName =
         std::regex_replace(restfulApiConfig.get("class_name", "/*").asString(),
                            regex,

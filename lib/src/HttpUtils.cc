@@ -1,7 +1,7 @@
 /**
  *
- *  @file HttpUtils.h
- *  An Tao
+ *  @file HttpUtils.cc
+ *  @author An Tao
  *
  *  Copyright 2018, An Tao.  All rights reserved.
  *  https://github.com/an-tao/drogon
@@ -15,431 +15,567 @@
 #include "HttpUtils.h"
 #include <drogon/utils/Utilities.h>
 #include <trantor/utils/Logger.h>
+#include <map>
 #include <unordered_map>
+#include <mutex>
 
 namespace drogon
 {
-const string_view &webContentTypeToString(ContentType contenttype)
-{
-    switch (contenttype)
-    {
-        case CT_TEXT_HTML:
-        {
-            static string_view sv =
-                "Content-Type: text/html; charset=utf-8\r\n";
-            return sv;
-        }
-        case CT_APPLICATION_X_FORM:
-        {
-            static string_view sv =
-                "Content-Type: application/x-www-form-urlencoded\r\n";
-            return sv;
-        }
-        case CT_APPLICATION_XML:
-        {
-            static string_view sv =
-                "Content-Type: application/xml; charset=utf-8\r\n";
-            return sv;
-        }
-        case CT_APPLICATION_JSON:
-        {
-            static string_view sv =
-                "Content-Type: application/json; charset=utf-8\r\n";
-            return sv;
-        }
-        case CT_APPLICATION_X_JAVASCRIPT:
-        {
-            static string_view sv =
-                "Content-Type: application/x-javascript; charset=utf-8\r\n";
-            return sv;
-        }
-        case CT_TEXT_CSS:
-        {
-            static string_view sv = "Content-Type: text/css; charset=utf-8\r\n";
-            return sv;
-        }
-        case CT_TEXT_XML:
-        {
-            static string_view sv = "Content-Type: text/xml; charset=utf-8\r\n";
-            return sv;
-        }
-        case CT_TEXT_XSL:
-        {
-            static string_view sv = "Content-Type: text/xsl; charset=utf-8\r\n";
-            return sv;
-        }
-        case CT_APPLICATION_OCTET_STREAM:
-        {
-            static string_view sv =
-                "Content-Type: application/octet-stream\r\n";
-            return sv;
-        }
-        case CT_IMAGE_SVG_XML:
-        {
-            static string_view sv = "Content-Type: image/svg+xml\r\n";
-            return sv;
-        }
-        case CT_APPLICATION_X_FONT_TRUETYPE:
-        {
-            static string_view sv =
-                "Content-Type: application/x-font-truetype\r\n";
-            return sv;
-        }
-        case CT_APPLICATION_X_FONT_OPENTYPE:
-        {
-            static string_view sv =
-                "Content-Type: application/x-font-opentype\r\n";
-            return sv;
-        }
-        case CT_APPLICATION_FONT_WOFF:
-        {
-            static string_view sv = "Content-Type: application/font-woff\r\n";
-            return sv;
-        }
-        case CT_APPLICATION_FONT_WOFF2:
-        {
-            static string_view sv = "Content-Type: application/font-woff2\r\n";
-            return sv;
-        }
-        case CT_APPLICATION_VND_MS_FONTOBJ:
-        {
-            static string_view sv =
-                "Content-Type: application/vnd.ms-fontobject\r\n";
-            return sv;
-        }
-        case CT_APPLICATION_PDF:
-        {
-            static string_view sv = "Content-Type: application/pdf\r\n";
-            return sv;
-        }
-        case CT_IMAGE_PNG:
-        {
-            static string_view sv = "Content-Type: image/png\r\n";
-            return sv;
-        }
-        case CT_IMAGE_JPG:
-        {
-            static string_view sv = "Content-Type: image/jpeg\r\n";
-            return sv;
-        }
-        case CT_IMAGE_GIF:
-        {
-            static string_view sv = "Content-Type: image/gif\r\n";
-            return sv;
-        }
-        case CT_IMAGE_XICON:
-        {
-            static string_view sv = "Content-Type: image/x-icon\r\n";
-            return sv;
-        }
-        case CT_IMAGE_BMP:
-        {
-            static string_view sv = "Content-Type: image/bmp\r\n";
-            return sv;
-        }
-        case CT_IMAGE_ICNS:
-        {
-            static string_view sv = "Content-Type: image/icns\r\n";
-            return sv;
-        }
-        case CT_APPLICATION_WASM:
-        {
-            static string_view sv = "Content-Type: application/wasm\r\n";
-            return sv;
-        }
-        default:
-        case CT_TEXT_PLAIN:
-        {
-            static string_view sv =
-                "Content-Type: text/plain; charset=utf-8\r\n";
-            return sv;
-        }
-    }
-}
+static std::unordered_map<std::string, std::string> customMime;
 
-const string_view &statusCodeToString(int code)
+// https://en.wikipedia.org/wiki/List_of_file_formats
+// https://developer.mozilla.org/en-US/docs/Web/HTTP/Basics_of_HTTP/MIME_types/Common_types
+// https://www.digipres.org/formats/mime-types/
+// https://www.iana.org/assignments/media-types/media-types.xhtml
+// content type -> list of corresponding mime types, the first being the default
+// (more standard) one + the mime type to return in contentTypeToMime() when not
+// empty (mainly to return the charset for text types)
+static const std::unordered_map<
+    ContentType,
+    std::pair<std::vector<std::string_view>, std::string_view>>
+    mimeTypeDatabase_{
+        {CT_NONE, {{""}, ""}},
+        {CT_APPLICATION_OCTET_STREAM, {{"application/octet-stream"}, ""}},
+        {CT_APPLICATION_X_FORM, {{"application/x-www-form-urlencoded"}, ""}},
+        {CT_MULTIPART_FORM_DATA, {{"multipart/form-data"}, ""}},
+        {CT_APPLICATION_GZIP, {{"application/gzip"}, ""}},
+        {CT_APPLICATION_JSON,
+         {{"application/json"}, "application/json; charset=utf-8"}},
+        {CT_APPLICATION_FONT_WOFF, {{"application/font-woff"}, ""}},
+        {CT_APPLICATION_FONT_WOFF2, {{"application/font-woff2"}, ""}},
+        {CT_APPLICATION_JAVA_ARCHIVE,
+         {{"application/java-archive", "application/x-java-archive"}, ""}},
+        {CT_APPLICATION_MSWORD, {{"application/msword"}, ""}},
+        {CT_APPLICATION_MSWORDX,
+         {{"application/"
+           "vnd.openxmlformats-officedocument.wordprocessingml.document"},
+          ""}},
+        {CT_APPLICATION_PDF, {{"application/pdf"}, ""}},
+        {CT_APPLICATION_VND_MS_FONTOBJ,
+         {{"application/vnd.ms-fontobject"}, ""}},
+        {CT_APPLICATION_VND_RAR, {{"application/vnd.rar"}, ""}},
+        {CT_APPLICATION_WASM, {{"application/wasm"}, ""}},
+        {CT_APPLICATION_X_BZIP, {{"application/x-bzip"}, ""}},
+        {CT_APPLICATION_X_BZIP2, {{"application/x-bzip2"}, ""}},
+        {CT_APPLICATION_X_7Z, {{"application/x-7z-compressed"}, ""}},
+        {CT_APPLICATION_X_HTTPD_PHP, {{"application/x-httpd-php"}, ""}},
+        {CT_APPLICATION_X_JAVASCRIPT,
+         {{"application/x-javascript"},
+          "application/x-javascript; charset=utf-8"}},
+        {CT_APPLICATION_X_FONT_OPENTYPE,
+         {{"application/x-font-opentype", "font/otf"}, ""}},
+        {CT_APPLICATION_X_FONT_TRUETYPE,
+         {{"application/x-font-truetype", "font/ttf"}, ""}},
+        {CT_APPLICATION_X_TAR, {{"application/x-tar"}, ""}},
+        {CT_APPLICATION_X_TGZ, {{"application/x-tgz"}, ""}},
+        {CT_APPLICATION_X_XZ, {{"application/x-xz", "application/x-lzma"}, ""}},
+        {CT_APPLICATION_XHTML,
+         {{"application/xhtml+xml", "application/xhtml"},
+          "application/xhtml+xml; charset=utf-8"}},
+        {CT_APPLICATION_XML,
+         {{"application/xml"}, "application/xml; charset=utf-8"}},
+        {CT_APPLICATION_ZIP, {{"application/zip"}, ""}},
+        {CT_AUDIO_AAC, {{"audio/aac", "audio/aacp"}, ""}},
+        {CT_AUDIO_AC3, {{"audio/ac3"}, ""}},
+        {CT_AUDIO_AIFF, {{"audio/aiff", "audio/x-aiff"}, ""}},
+        {CT_AUDIO_FLAC, {{"audio/flac"}, ""}},
+        {CT_AUDIO_MATROSKA, {{"audio/matroska", "audio/x-matroska"}, ""}},
+        {CT_AUDIO_MPEG, {{"audio/mpeg"}, ""}},
+        {CT_AUDIO_MPEG4, {{"audio/mp4", "audio/x-m4a"}, ""}},
+        {CT_AUDIO_OGG, {{"audio/ogg"}, ""}},
+        {CT_AUDIO_WAVE, {{"audio/wav", "audio/x-wav"}, ""}},
+        {CT_AUDIO_X_APE, {{"audio/x-ape"}, ""}},
+        {CT_AUDIO_X_MS_WMA, {{"audio/x-ms-wma"}, ""}},
+        {CT_AUDIO_X_TTA, {{"audio/x-tta"}, ""}},
+        {CT_AUDIO_X_WAVPACK, {{"audio/x-wavpack"}, ""}},
+        {CT_AUDIO_WEBM, {{"audio/webm"}, ""}},
+        {CT_IMAGE_APNG, {{"image/apng"}, ""}},
+        {CT_IMAGE_AVIF, {{"image/avif"}, ""}},
+        {CT_IMAGE_BMP, {{"image/bmp"}, ""}},
+        {CT_IMAGE_GIF, {{"image/gif"}, ""}},
+        {CT_IMAGE_ICNS, {{"image/icns"}, ""}},
+        {CT_IMAGE_JP2, {{"image/jp2", "image/jpx", "image/jpm"}, ""}},
+        {CT_IMAGE_JPG, {{"image/jpeg"}, ""}},
+        {CT_IMAGE_PNG, {{"image/png"}, ""}},
+        {CT_IMAGE_SVG_XML, {{"image/svg+xml"}, ""}},
+        {CT_IMAGE_TIFF, {{"image/tiff"}, ""}},
+        {CT_IMAGE_WEBP, {{"image/webp"}, ""}},
+        {CT_IMAGE_X_MNG, {{"image/x-mng"}, ""}},
+        {CT_IMAGE_X_TGA, {{"image/x-tga", "image/x-targa"}, ""}},
+        {CT_IMAGE_XICON, {{"image/vnd.microsoft.icon", "image/x-icon"}, ""}},
+        {CT_TEXT_CSS, {{"text/css"}, "text/css; charset=utf-8"}},
+        {CT_TEXT_CSV, {{"text/csv"}, "text/csv; charset=utf-8"}},
+        {CT_TEXT_HTML, {{"text/html"}, "text/html; charset=utf-8"}},
+        {CT_TEXT_JAVASCRIPT,
+         {{"text/javascript"}, "text/javascript; charset=utf-8"}},
+        {CT_TEXT_PLAIN, {{"text/plain"}, "text/plain; charset=utf-8"}},
+        {CT_TEXT_XML, {{"text/xml"}, "text/xml; charset=utf-8"}},
+        {CT_TEXT_XSL, {{"text/xsl"}, "text/xsl; charset=utf-8"}},
+        {CT_VIDEO_APG, {{"video/apg"}, ""}},
+        {CT_VIDEO_AV1, {{"video/av01", "video/av1"}, ""}},
+        {CT_VIDEO_QUICKTIME, {{"video/quicktime"}, ""}},
+        {CT_VIDEO_MPEG, {{"video/mpeg"}, ""}},
+        {CT_VIDEO_MPEG2TS, {{"video/mp2t"}, ""}},
+        {CT_VIDEO_MP4, {{"video/mp4"}, ""}},
+        {CT_VIDEO_OGG, {{"video/ogg"}, ""}},
+        {CT_VIDEO_WEBM, {{"video/webm"}, ""}},
+        {CT_VIDEO_X_M4V, {{"video/x-m4v"}, ""}},
+        {CT_VIDEO_MATROSKA, {{"video/matroska", "video/x-matroska"}, ""}},
+        {CT_VIDEO_X_MSVIDEO, {{"video/x-msvideo"}, ""}},
+    };
+
+static const std::unordered_map<std::string_view,
+                                std::pair<FileType, ContentType>>
+    fileTypeDatabase_{
+        {"", {FT_UNKNOWN, CT_CUSTOM}},
+        {"aac", {FT_AUDIO, CT_AUDIO_AAC}},
+        {"ac3", {FT_AUDIO, CT_AUDIO_AC3}},
+        {"aif", {FT_AUDIO, CT_AUDIO_AIFF}},
+        {"aifc", {FT_AUDIO, CT_AUDIO_AIFF}},
+        {"aiff", {FT_AUDIO, CT_AUDIO_AIFF}},
+        {"apg", {FT_AUDIO, CT_VIDEO_APG}},
+        {"ape", {FT_AUDIO, CT_AUDIO_X_APE}},
+        {"apng", {FT_IMAGE, CT_IMAGE_APNG}},
+        {"av1", {FT_MEDIA, CT_VIDEO_AV1}},
+        {"avi", {FT_MEDIA, CT_VIDEO_X_MSVIDEO}},
+        {"avif", {FT_IMAGE, CT_IMAGE_AVIF}},
+        {"bmp", {FT_IMAGE, CT_IMAGE_BMP}},
+        {"bz", {FT_ARCHIVE, CT_APPLICATION_X_BZIP}},
+        {"bz2", {FT_ARCHIVE, CT_APPLICATION_X_BZIP2}},
+        {"css", {FT_DOCUMENT, CT_TEXT_CSS}},
+        {"csv", {FT_DOCUMENT, CT_TEXT_CSV}},
+        {"doc", {FT_DOCUMENT, CT_APPLICATION_MSWORD}},
+        {"docx", {FT_DOCUMENT, CT_APPLICATION_MSWORDX}},
+        {"eot", {FT_DOCUMENT, CT_APPLICATION_VND_MS_FONTOBJ}},
+        {"flac", {FT_AUDIO, CT_AUDIO_FLAC}},
+        {"gif", {FT_MEDIA, CT_IMAGE_GIF}},
+        {"gz", {FT_ARCHIVE, CT_APPLICATION_GZIP}},
+        {"htm", {FT_DOCUMENT, CT_TEXT_HTML}},
+        {"html", {FT_DOCUMENT, CT_TEXT_HTML}},
+        {"icns", {FT_IMAGE, CT_IMAGE_ICNS}},
+        {"ico", {FT_IMAGE, CT_IMAGE_XICON}},
+        {"j2k", {FT_IMAGE, CT_IMAGE_JP2}},
+        {"jar", {FT_DOCUMENT, CT_APPLICATION_JAVA_ARCHIVE}},
+        {"j2c", {FT_IMAGE, CT_IMAGE_JP2}},
+        {"jp2", {FT_IMAGE, CT_IMAGE_JP2}},
+        {"jpeg", {FT_IMAGE, CT_IMAGE_JPG}},
+        {"jpc", {FT_IMAGE, CT_IMAGE_JP2}},
+        {"jpf", {FT_IMAGE, CT_IMAGE_JP2}},
+        {"jpg", {FT_IMAGE, CT_IMAGE_JPG}},
+        {"jpg2", {FT_IMAGE, CT_IMAGE_JP2}},
+        {"jpm", {FT_IMAGE, CT_IMAGE_JP2}},
+        {"jpx", {FT_IMAGE, CT_IMAGE_JP2}},
+        {"js", {FT_DOCUMENT, CT_TEXT_JAVASCRIPT}},
+        {"json", {FT_DOCUMENT, CT_APPLICATION_JSON}},
+        {"lzma", {FT_ARCHIVE, CT_APPLICATION_X_XZ}},
+        {"m1a", {FT_AUDIO, CT_AUDIO_MPEG}},
+        {"m1v", {FT_MEDIA, CT_VIDEO_MPEG}},
+        {"m2a", {FT_AUDIO, CT_AUDIO_MPEG}},
+        {"m2ts", {FT_MEDIA, CT_VIDEO_MPEG2TS}},
+        {"m2v", {FT_MEDIA, CT_VIDEO_MPEG}},
+        {"m4a", {FT_AUDIO, CT_AUDIO_MPEG4}},
+        {"m4v", {FT_MEDIA, CT_VIDEO_X_M4V}},
+        {"mjs", {FT_DOCUMENT, CT_TEXT_JAVASCRIPT}},
+        {"mka", {FT_AUDIO, CT_AUDIO_MATROSKA}},
+        {"mkv", {FT_MEDIA, CT_VIDEO_MATROSKA}},
+        {"mng", {FT_MEDIA, CT_IMAGE_X_MNG}},
+        {"mov", {FT_MEDIA, CT_VIDEO_QUICKTIME}},
+        {"mp1", {FT_AUDIO, CT_AUDIO_MPEG}},
+        {"mp2", {FT_AUDIO, CT_AUDIO_MPEG}},
+        {"mp3", {FT_AUDIO, CT_AUDIO_MPEG}},
+        {"mp4", {FT_MEDIA, CT_VIDEO_MP4}},
+        {"mpa", {FT_AUDIO, CT_AUDIO_MPEG}},
+        {"mpe", {FT_MEDIA, CT_VIDEO_MPEG}},
+        {"mpeg", {FT_MEDIA, CT_VIDEO_MPEG}},
+        {"mpg", {FT_MEDIA, CT_VIDEO_MPEG}},
+        {"mpv", {FT_MEDIA, CT_VIDEO_MPEG}},
+        {"oga", {FT_AUDIO, CT_AUDIO_OGG}},
+        {"ogg", {FT_AUDIO, CT_AUDIO_OGG}},
+        {"ogv", {FT_MEDIA, CT_VIDEO_OGG}},
+        {"otf", {FT_DOCUMENT, CT_APPLICATION_X_FONT_OPENTYPE}},
+        {"pdf", {FT_DOCUMENT, CT_APPLICATION_PDF}},
+        {"php", {FT_DOCUMENT, CT_APPLICATION_X_HTTPD_PHP}},
+        {"png", {FT_IMAGE, CT_IMAGE_PNG}},
+        {"rar", {FT_ARCHIVE, CT_APPLICATION_VND_RAR}},
+        {"svg", {FT_IMAGE, CT_IMAGE_SVG_XML}},
+        {"tar", {FT_ARCHIVE, CT_APPLICATION_X_TAR}},
+        {"targa", {FT_IMAGE, CT_IMAGE_X_TGA}},
+        {"tif", {FT_IMAGE, CT_IMAGE_TIFF}},
+        {"tiff", {FT_IMAGE, CT_IMAGE_TIFF}},
+        {"tga", {FT_IMAGE, CT_IMAGE_X_TGA}},
+        {"tgz", {FT_ARCHIVE, CT_APPLICATION_X_TGZ}},
+        {"ts", {FT_MEDIA, CT_VIDEO_MPEG2TS}},
+        {"tta", {FT_AUDIO, CT_AUDIO_X_TTA}},
+        {"ttf", {FT_DOCUMENT, CT_APPLICATION_X_FONT_TRUETYPE}},
+        {"txt", {FT_DOCUMENT, CT_TEXT_PLAIN}},
+        {"w64", {FT_AUDIO, CT_AUDIO_WAVE}},
+        {"wav", {FT_AUDIO, CT_AUDIO_WAVE}},
+        {"wave", {FT_AUDIO, CT_AUDIO_WAVE}},
+        {"wasm", {FT_DOCUMENT, CT_APPLICATION_WASM}},
+        {"weba", {FT_AUDIO, CT_AUDIO_WEBM}},
+        {"webm", {FT_MEDIA, CT_VIDEO_WEBM}},
+        {"webp", {FT_IMAGE, CT_IMAGE_WEBP}},
+        {"wma", {FT_AUDIO, CT_AUDIO_X_MS_WMA}},
+        {"woff", {FT_DOCUMENT, CT_APPLICATION_FONT_WOFF}},
+        {"woff2", {FT_DOCUMENT, CT_APPLICATION_FONT_WOFF2}},
+        {"wv", {FT_AUDIO, CT_AUDIO_X_WAVPACK}},
+        {"xht", {FT_DOCUMENT, CT_APPLICATION_XHTML}},
+        {"xhtml", {FT_DOCUMENT, CT_APPLICATION_XHTML}},
+        {"xml", {FT_DOCUMENT, CT_APPLICATION_XML}},
+        {"xsl", {FT_DOCUMENT, CT_TEXT_XSL}},
+        {"xz", {FT_ARCHIVE, CT_APPLICATION_X_XZ}},
+        {"zip", {FT_ARCHIVE, CT_APPLICATION_ZIP}},
+        {"7z", {FT_ARCHIVE, CT_APPLICATION_X_7Z}},
+    };
+
+const std::string_view &statusCodeToString(int code)
 {
     switch (code)
     {
         case 100:
         {
-            static string_view sv = "Continue";
+            static std::string_view sv = "Continue";
             return sv;
         }
         case 101:
         {
-            static string_view sv = "Switching Protocols";
+            static std::string_view sv = "Switching Protocols";
+            return sv;
+        }
+        case 102:
+        {
+            static std::string_view sv = "Processing";
+            return sv;
+        }
+        case 103:
+        {
+            static std::string_view sv = "Early Hints";
             return sv;
         }
         case 200:
         {
-            static string_view sv = "OK";
+            static std::string_view sv = "OK";
             return sv;
         }
         case 201:
         {
-            static string_view sv = "Created";
+            static std::string_view sv = "Created";
             return sv;
         }
         case 202:
         {
-            static string_view sv = "Accepted";
+            static std::string_view sv = "Accepted";
             return sv;
         }
         case 203:
         {
-            static string_view sv = "Non-Authoritative Information";
+            static std::string_view sv = "Non-Authoritative Information";
             return sv;
         }
         case 204:
         {
-            static string_view sv = "No Content";
+            static std::string_view sv = "No Content";
             return sv;
         }
         case 205:
         {
-            static string_view sv = "Reset Content";
+            static std::string_view sv = "Reset Content";
             return sv;
         }
         case 206:
         {
-            static string_view sv = "Partial Content";
+            static std::string_view sv = "Partial Content";
+            return sv;
+        }
+        case 207:
+        {
+            static std::string_view sv = "Multi-Status";
+            return sv;
+        }
+        case 208:
+        {
+            static std::string_view sv = "Already Reported";
+            return sv;
+        }
+        case 226:
+        {
+            static std::string_view sv = "IM Used";
             return sv;
         }
         case 300:
         {
-            static string_view sv = "Multiple Choices";
+            static std::string_view sv = "Multiple Choices";
             return sv;
         }
         case 301:
         {
-            static string_view sv = "Moved Permanently";
+            static std::string_view sv = "Moved Permanently";
             return sv;
         }
         case 302:
         {
-            static string_view sv = "Found";
+            static std::string_view sv = "Found";
             return sv;
         }
         case 303:
         {
-            static string_view sv = "See Other";
+            static std::string_view sv = "See Other";
             return sv;
         }
         case 304:
         {
-            static string_view sv = "Not Modified";
+            static std::string_view sv = "Not Modified";
             return sv;
         }
         case 305:
         {
-            static string_view sv = "Use Proxy";
+            static std::string_view sv = "Use Proxy";
+            return sv;
+        }
+        case 306:
+        {
+            static std::string_view sv = "(Unused)";
             return sv;
         }
         case 307:
         {
-            static string_view sv = "Temporary Redirect";
+            static std::string_view sv = "Temporary Redirect";
             return sv;
         }
         case 308:
         {
-            static string_view sv = "Permanent Redirect";
+            static std::string_view sv = "Permanent Redirect";
             return sv;
         }
         case 400:
         {
-            static string_view sv = "Bad Request";
+            static std::string_view sv = "Bad Request";
             return sv;
         }
         case 401:
         {
-            static string_view sv = "Unauthorized";
+            static std::string_view sv = "Unauthorized";
             return sv;
         }
         case 402:
         {
-            static string_view sv = "Payment Required";
+            static std::string_view sv = "Payment Required";
             return sv;
         }
         case 403:
         {
-            static string_view sv = "Forbidden";
+            static std::string_view sv = "Forbidden";
             return sv;
         }
         case 404:
         {
-            static string_view sv = "Not Found";
+            static std::string_view sv = "Not Found";
             return sv;
         }
         case 405:
         {
-            static string_view sv = "Method Not Allowed";
+            static std::string_view sv = "Method Not Allowed";
             return sv;
         }
         case 406:
         {
-            static string_view sv = "Not Acceptable";
+            static std::string_view sv = "Not Acceptable";
             return sv;
         }
         case 407:
         {
-            static string_view sv = "Proxy Authentication Required";
+            static std::string_view sv = "Proxy Authentication Required";
             return sv;
         }
         case 408:
         {
-            static string_view sv = "Request Time-out";
+            static std::string_view sv = "Request Time-out";
             return sv;
         }
         case 409:
         {
-            static string_view sv = "Conflict";
+            static std::string_view sv = "Conflict";
             return sv;
         }
         case 410:
         {
-            static string_view sv = "Gone";
+            static std::string_view sv = "Gone";
             return sv;
         }
         case 411:
         {
-            static string_view sv = "Length Required";
+            static std::string_view sv = "Length Required";
             return sv;
         }
         case 412:
         {
-            static string_view sv = "Precondition Failed";
+            static std::string_view sv = "Precondition Failed";
             return sv;
         }
         case 413:
         {
-            static string_view sv = "Request Entity Too Large";
+            static std::string_view sv = "Request Entity Too Large";
             return sv;
         }
         case 414:
         {
-            static string_view sv = "Request-URI Too Large";
+            static std::string_view sv = "Request-URI Too Large";
             return sv;
         }
         case 415:
         {
-            static string_view sv = "Unsupported Media Type";
+            static std::string_view sv = "Unsupported Media Type";
             return sv;
         }
         case 416:
         {
-            static string_view sv = "Requested Range Not Satisfiable";
+            static std::string_view sv = "Requested Range Not Satisfiable";
             return sv;
         }
         case 417:
         {
-            static string_view sv = "Expectation Failed";
+            static std::string_view sv = "Expectation Failed";
             return sv;
         }
         case 418:
         {
-            static string_view sv = "I'm a Teapot";
+            static std::string_view sv = "I'm a Teapot";
             return sv;
         }
         case 421:
         {
-            static string_view sv = "Misdirected Request";
+            static std::string_view sv = "Misdirected Request";
+            return sv;
+        }
+        case 422:
+        {
+            static std::string_view sv = "Unprocessable Entity";
+            return sv;
+        }
+        case 423:
+        {
+            static std::string_view sv = "Locked";
+            return sv;
+        }
+        case 424:
+        {
+            static std::string_view sv = "Failed Dependency";
             return sv;
         }
         case 425:
         {
-            static string_view sv = "Too Early";
+            static std::string_view sv = "Too Early";
             return sv;
         }
         case 426:
         {
-            static string_view sv = "Upgrade Required";
+            static std::string_view sv = "Upgrade Required";
             return sv;
         }
         case 428:
         {
-            static string_view sv = "Precondition Required";
+            static std::string_view sv = "Precondition Required";
             return sv;
         }
         case 429:
         {
-            static string_view sv = "Too Many Requests";
+            static std::string_view sv = "Too Many Requests";
             return sv;
         }
         case 431:
         {
-            static string_view sv = "Request Header Fields Too Large";
+            static std::string_view sv = "Request Header Fields Too Large";
             return sv;
         }
         case 451:
         {
-            static string_view sv = "Unavailable For Legal Reasons";
+            static std::string_view sv = "Unavailable For Legal Reasons";
             return sv;
         }
         case 500:
         {
-            static string_view sv = "Internal Server Error";
+            static std::string_view sv = "Internal Server Error";
             return sv;
         }
         case 501:
         {
-            static string_view sv = "Not Implemented";
+            static std::string_view sv = "Not Implemented";
             return sv;
         }
         case 502:
         {
-            static string_view sv = "Bad Gateway";
+            static std::string_view sv = "Bad Gateway";
             return sv;
         }
         case 503:
         {
-            static string_view sv = "Service Unavailable";
+            static std::string_view sv = "Service Unavailable";
             return sv;
         }
         case 504:
         {
-            static string_view sv = "Gateway Time-out";
+            static std::string_view sv = "Gateway Time-out";
             return sv;
         }
         case 505:
         {
-            static string_view sv = "HTTP Version Not Supported";
+            static std::string_view sv = "HTTP Version Not Supported";
+            return sv;
+        }
+        case 506:
+        {
+            static std::string_view sv = "Variant Also Negotiates";
+            return sv;
+        }
+        case 507:
+        {
+            static std::string_view sv = "Insufficient Storage";
+            return sv;
+        }
+        case 508:
+        {
+            static std::string_view sv = "Loop Detected";
             return sv;
         }
         case 510:
         {
-            static string_view sv = "Not Extended";
+            static std::string_view sv = "Not Extended";
+            return sv;
+        }
+        case 511:
+        {
+            static std::string_view sv = "Network Authentication Required";
             return sv;
         }
         default:
             if (code >= 100 && code < 200)
             {
-                static string_view sv = "Informational";
+                static std::string_view sv = "Informational";
                 return sv;
             }
             else if (code >= 200 && code < 300)
             {
-                static string_view sv = "Successful";
+                static std::string_view sv = "Successful";
                 return sv;
             }
             else if (code >= 300 && code < 400)
             {
-                static string_view sv = "Redirection";
+                static std::string_view sv = "Redirection";
                 return sv;
             }
             else if (code >= 400 && code < 500)
             {
-                static string_view sv = "Bad Request";
+                static std::string_view sv = "Bad Request";
                 return sv;
             }
             else if (code >= 500 && code < 600)
             {
-                static string_view sv = "Server Error";
+                static std::string_view sv = "Server Error";
                 return sv;
             }
             else
             {
-                static string_view sv = "Undefined Error";
+                static std::string_view sv = "Undefined Error";
                 return sv;
             }
     }
@@ -452,132 +588,156 @@ ContentType getContentType(const std::string &fileName)
     if (pos != std::string::npos)
     {
         extName = fileName.substr(pos + 1);
-        transform(extName.begin(), extName.end(), extName.begin(), tolower);
+        transform(extName.begin(),
+                  extName.end(),
+                  extName.begin(),
+                  [](unsigned char c) { return tolower(c); });
     }
-    switch (extName.length())
-    {
-        case 0:
-            return CT_APPLICATION_OCTET_STREAM;
-        case 2:
-        {
-            if (extName == "js")
-                return CT_APPLICATION_X_JAVASCRIPT;
-            return CT_APPLICATION_OCTET_STREAM;
-        }
-        case 3:
-        {
-            switch (extName[0])
-            {
-                case 'b':
-                    if (extName == "bmp")
-                        return CT_IMAGE_BMP;
-                    break;
-                case 'c':
-                    if (extName == "css")
-                        return CT_TEXT_CSS;
-                    break;
-                case 'e':
-                    if (extName == "eot")
-                        return CT_APPLICATION_VND_MS_FONTOBJ;
-                    break;
-                case 'g':
-                    if (extName == "gif")
-                        return CT_IMAGE_GIF;
-                    break;
-                case 'i':
-                    if (extName == "ico")
-                        return CT_IMAGE_XICON;
-                    break;
-                case 'j':
-                    if (extName == "jpg")
-                        return CT_IMAGE_JPG;
-                    break;
-                case 'o':
-                    if (extName == "otf")
-                        return CT_APPLICATION_X_FONT_OPENTYPE;
-                    break;
-                case 'p':
-                    if (extName == "png")
-                        return CT_IMAGE_PNG;
-                    else if (extName == "pdf")
-                        return CT_APPLICATION_PDF;
-                    break;
-                case 's':
-                    if (extName == "svg")
-                        return CT_IMAGE_SVG_XML;
-                    break;
-                case 't':
-                    if (extName == "txt")
-                        return CT_TEXT_PLAIN;
-                    else if (extName == "ttf")
-                        return CT_APPLICATION_X_FONT_TRUETYPE;
-                    break;
-                case 'x':
-                    if (extName == "xml")
-                        return CT_TEXT_XML;
-                    else if (extName == "xsl")
-                        return CT_TEXT_XSL;
-                    break;
-                default:
-                    break;
-            }
-            return CT_APPLICATION_OCTET_STREAM;
-        }
-        case 4:
-        {
-            if (extName == "html")
-                return CT_TEXT_HTML;
-            else if (extName == "jpeg")
-                return CT_IMAGE_JPG;
-            else if (extName == "icns")
-                return CT_IMAGE_ICNS;
-            else if (extName == "woff")
-                return CT_APPLICATION_FONT_WOFF;
-            return CT_APPLICATION_OCTET_STREAM;
-        }
-        case 5:
-        {
-            if (extName == "woff2")
-                return CT_APPLICATION_FONT_WOFF2;
-            return CT_APPLICATION_OCTET_STREAM;
-        }
-        default:
-            return CT_APPLICATION_OCTET_STREAM;
-    }
+    auto it = fileTypeDatabase_.find(extName);
+    return (it == fileTypeDatabase_.end()) ? CT_APPLICATION_OCTET_STREAM
+                                           : it->second.second;
 }
 
-ContentType parseContentType(const string_view &contentType)
+ContentType parseContentType(const std::string_view &contentType)
 {
-    static const std::unordered_map<string_view, ContentType> map_{
-        {"text/html", CT_TEXT_HTML},
-        {"application/x-www-form-urlencoded", CT_APPLICATION_X_FORM},
-        {"application/xml", CT_APPLICATION_XML},
-        {"application/json", CT_APPLICATION_JSON},
-        {"application/x-javascript", CT_APPLICATION_X_JAVASCRIPT},
-        {"text/css", CT_TEXT_CSS},
-        {"text/xml", CT_TEXT_XML},
-        {"text/xsl", CT_TEXT_XSL},
-        {"application/octet-stream", CT_APPLICATION_OCTET_STREAM},
-        {"image/svg+xml", CT_IMAGE_SVG_XML},
-        {"application/x-font-truetype", CT_APPLICATION_X_FONT_TRUETYPE},
-        {"application/x-font-opentype", CT_APPLICATION_X_FONT_OPENTYPE},
-        {"application/font-woff", CT_APPLICATION_FONT_WOFF},
-        {"application/font-woff2", CT_APPLICATION_FONT_WOFF2},
-        {"application/vnd.ms-fontobject", CT_APPLICATION_VND_MS_FONTOBJ},
-        {"application/pdf", CT_APPLICATION_PDF},
-        {"image/png", CT_IMAGE_PNG},
-        {"image/jpeg", CT_IMAGE_JPG},
-        {"image/gif", CT_IMAGE_GIF},
-        {"image/x-icon", CT_IMAGE_XICON},
-        {"image/bmp", CT_IMAGE_BMP},
-        {"image/icns", CT_IMAGE_ICNS},
-        {"application/wasm", CT_APPLICATION_WASM},
-        {"text/plain", CT_TEXT_PLAIN},
-        {"multipart/form-data", CT_MULTIPART_FORM_DATA}};
-    auto iter = map_.find(contentType);
-    if (iter == map_.end())
-        return CT_NONE;
-    return iter->second;
+    // Generate map from database for faster query
+    static std::unordered_map<std::string_view, ContentType> contentTypeMap_;
+    // Thread safe initialization
+    static std::once_flag flag;
+    std::call_once(flag, []() {
+        for (const auto &e : mimeTypeDatabase_)
+        {
+            for (const auto &type : e.second.first)
+                contentTypeMap_[type] = e.first;
+        }
+    });
+    auto ext = contentType.find(';');
+    if (ext != std::string_view::npos)
+        return parseContentType(contentType.substr(0, ext));
+    if (contentType == "application/x-www-form-urlencoded")
+        return CT_APPLICATION_X_FORM;
+    if (contentType == "multipart/form-data")
+        return CT_MULTIPART_FORM_DATA;
+    auto it = contentTypeMap_.find(contentType);
+    return (it == contentTypeMap_.end()) ? CT_CUSTOM : it->second;
+}
+
+FileType parseFileType(const std::string_view &fileExtension)
+{
+    std::string extName(fileExtension);
+    transform(extName.begin(),
+              extName.end(),
+              extName.begin(),
+              [](unsigned char c) { return tolower(c); });
+    auto it = fileTypeDatabase_.find(extName);
+    return (it == fileTypeDatabase_.end()) ? FT_CUSTOM : it->second.first;
+}
+
+FileType getFileType(ContentType contentType)
+{
+    // Generate map from database for faster query
+    static std::unordered_map<ContentType, FileType> fileTypeMap_;
+    // Thread safe initialization
+    static std::once_flag flag;
+    std::call_once(flag, []() {
+        for (const auto &e : fileTypeDatabase_)
+            fileTypeMap_[e.second.second] = e.second.first;
+        fileTypeMap_[CT_NONE] = FT_UNKNOWN;
+        fileTypeMap_[CT_CUSTOM] = FT_CUSTOM;
+    });
+    auto it = fileTypeMap_.find(contentType);
+    return (it == fileTypeMap_.end()) ? FT_UNKNOWN : it->second;
+}
+
+const std::string_view &contentTypeToMime(ContentType contentType)
+{
+    auto it = mimeTypeDatabase_.find(contentType);
+    return (it == mimeTypeDatabase_.end())
+               ? mimeTypeDatabase_.at(CT_APPLICATION_OCTET_STREAM).first.front()
+               : (it->second.second.empty() ? it->second.first.front()
+                                            : it->second.second);
+}
+
+void registerCustomExtensionMime(const std::string &ext,
+                                 const std::string &mime)
+{
+    if (ext.empty())
+        return;
+    auto &mimeStr = customMime[ext];
+    if (!mimeStr.empty())
+    {
+        LOG_WARN << ext << " has already been registered as type " << mime
+                 << ". Overwriting.";
+    }
+    mimeStr = mime;
+}
+
+const std::string_view fileNameToMime(const std::string &fileName)
+{
+    ContentType internalContentType = getContentType(fileName);
+    if (internalContentType != CT_APPLICATION_OCTET_STREAM)
+        return contentTypeToMime(internalContentType);
+
+    std::string extName;
+    auto pos = fileName.rfind('.');
+    if (pos != std::string::npos)
+    {
+        extName = fileName.substr(pos + 1);
+        transform(extName.begin(),
+                  extName.end(),
+                  extName.begin(),
+                  [](unsigned char c) { return tolower(c); });
+    }
+    auto it = customMime.find(extName);
+    if (it == customMime.end())
+        return "";
+    return it->second;
+}
+
+std::pair<ContentType, const std::string_view> fileNameToContentTypeAndMime(
+    const std::string &fileName)
+{
+    ContentType internalContentType = getContentType(fileName);
+    if (internalContentType != CT_APPLICATION_OCTET_STREAM)
+        return {internalContentType, contentTypeToMime(internalContentType)};
+
+    std::string extName;
+    auto pos = fileName.rfind('.');
+    if (pos != std::string::npos)
+    {
+        extName = fileName.substr(pos + 1);
+        transform(extName.begin(),
+                  extName.end(),
+                  extName.begin(),
+                  [](unsigned char c) { return tolower(c); });
+    }
+    auto it = customMime.find(extName);
+    if (it == customMime.end())
+        return {CT_NONE, ""};
+    return {CT_CUSTOM, it->second};
+}
+
+const std::vector<std::string_view> &getFileExtensions(ContentType contentType)
+{
+    // Generate map from database for faster query
+    static std::unordered_map<ContentType, std::vector<std::string_view>>
+        extensionMap_;
+    static std::vector<std::string_view> notFound_;
+    // Thread safe initialization
+    static std::once_flag flag;
+    std::call_once(flag, []() {
+        for (const auto &e : fileTypeDatabase_)
+            if (!e.first.empty())
+                extensionMap_[e.second.second].push_back(e.first);
+        // Add deprecated
+        extensionMap_[CT_APPLICATION_X_JAVASCRIPT] =
+            extensionMap_[CT_TEXT_JAVASCRIPT];
+        extensionMap_[CT_TEXT_XML] = extensionMap_[CT_APPLICATION_XML];
+    });
+    auto it = extensionMap_.find(contentType);
+    if (it == extensionMap_.end())
+        return notFound_;
+    return it->second;
 }
 
 }  // namespace drogon

@@ -95,8 +95,11 @@ void create_controller::newSimpleControllerHeaderFile(
     const std::string &className)
 {
     file << "#pragma once\n";
+    file << "\n";
     file << "#include <drogon/HttpSimpleController.h>\n";
+    file << "\n";
     file << "using namespace drogon;\n";
+    file << "\n";
     std::string class_name = className;
     std::string namepace_path = "/";
     auto pos = class_name.find("::");
@@ -111,19 +114,19 @@ void create_controller::newSimpleControllerHeaderFile(
         file << "{\n";
         pos = class_name.find("::");
     }
-    file << "class " << class_name << ":public drogon::HttpSimpleController<"
+    file << "class " << class_name << " : public drogon::HttpSimpleController<"
          << class_name << ">\n";
     file << "{\n";
     file << "  public:\n";
-    file << "    virtual void asyncHandleHttpRequest(const HttpRequestPtr& "
+    file << "    void asyncHandleHttpRequest(const HttpRequestPtr& "
             "req, std::function<void (const HttpResponsePtr &)> &&callback) "
             "override;\n";
 
     file << "    PATH_LIST_BEGIN\n";
-    file << "    //list path definitions here;\n";
+    file << "    // list path definitions here;\n";
     file << "    "
-            "//PATH_ADD(\"/"
-            "path\",\"filter1\",\"filter2\",HttpMethod1,HttpMethod2...);\n";
+            "// PATH_ADD(\"/"
+            "path\", \"filter1\", \"filter2\", HttpMethod1, HttpMethod2...);\n";
     file << "    PATH_LIST_END\n";
     file << "};\n";
     while (namespaceCount > 0)
@@ -132,26 +135,29 @@ void create_controller::newSimpleControllerHeaderFile(
         file << "}\n";
     }
 }
+
 void create_controller::newSimpleControllerSourceFile(
     std::ofstream &file,
     const std::string &className,
     const std::string &filename)
 {
     file << "#include \"" << filename << ".h\"\n";
+    file << "\n";
     auto pos = className.rfind("::");
     auto class_name = className;
     if (pos != std::string::npos)
     {
         auto namespacename = className.substr(0, pos);
         file << "using namespace " << namespacename << ";\n";
+        file << "\n";
         class_name = className.substr(pos + 2);
     }
     file << "void " << class_name
          << "::asyncHandleHttpRequest(const HttpRequestPtr& req, "
             "std::function<void (const HttpResponsePtr &)> &&callback)\n";
     file << "{\n";
-    file << "    //write your application logic here\n";
-    file << "}";
+    file << "    // write your application logic here\n";
+    file << "}\n";
 }
 
 void create_controller::newWebsockControllerHeaderFile(
@@ -159,8 +165,11 @@ void create_controller::newWebsockControllerHeaderFile(
     const std::string &className)
 {
     file << "#pragma once\n";
+    file << "\n";
     file << "#include <drogon/WebSocketController.h>\n";
+    file << "\n";
     file << "using namespace drogon;\n";
+    file << "\n";
     std::string class_name = className;
     std::string namepace_path = "/";
     auto pos = class_name.find("::");
@@ -175,23 +184,22 @@ void create_controller::newWebsockControllerHeaderFile(
         file << "{\n";
         pos = class_name.find("::");
     }
-    file << "class " << class_name << ":public drogon::WebSocketController<"
+    file << "class " << class_name << " : public drogon::WebSocketController<"
          << class_name << ">\n";
     file << "{\n";
     file << "  public:\n";
-    file
-        << "    virtual void handleNewMessage(const WebSocketConnectionPtr&,\n";
+    file << "     void handleNewMessage(const WebSocketConnectionPtr&,\n";
     file << "                                  std::string &&,\n";
     file << "                                  const WebSocketMessageType &) "
             "override;\n";
-    file << "    virtual void handleNewConnection(const HttpRequestPtr &,\n";
+    file << "    void handleNewConnection(const HttpRequestPtr &,\n";
     file << "                                     const "
-            "WebSocketConnectionPtr&)override;\n";
-    file << "    virtual void handleConnectionClosed(const "
-            "WebSocketConnectionPtr&)override;\n";
+            "WebSocketConnectionPtr&) override;\n";
+    file << "    void handleConnectionClosed(const "
+            "WebSocketConnectionPtr&) override;\n";
     file << "    WS_PATH_LIST_BEGIN\n";
-    file << "    //list path definitions here;\n";
-    file << "    //WS_PATH_ADD(\"/path\",\"filter1\",\"filter2\",...);\n";
+    file << "    // list path definitions here;\n";
+    file << "    // WS_PATH_ADD(\"/path\", \"filter1\", \"filter2\", ...);\n";
     file << "    WS_PATH_LIST_END\n";
     file << "};\n";
     while (namespaceCount > 0)
@@ -200,37 +208,42 @@ void create_controller::newWebsockControllerHeaderFile(
         file << "}\n";
     }
 }
+
 void create_controller::newWebsockControllerSourceFile(
     std::ofstream &file,
     const std::string &className,
     const std::string &filename)
 {
     file << "#include \"" << filename << ".h\"\n";
+    file << "\n";
     auto pos = className.rfind("::");
     auto class_name = className;
     if (pos != std::string::npos)
     {
         auto namespacename = className.substr(0, pos);
         file << "using namespace " << namespacename << ";\n";
+        file << "\n";
         class_name = className.substr(pos + 2);
     }
     file << "void " << class_name
          << "::handleNewMessage(const WebSocketConnectionPtr& wsConnPtr, "
             "std::string &&message, const WebSocketMessageType &type)\n";
     file << "{\n";
-    file << "    //write your application logic here\n";
+    file << "    // write your application logic here\n";
     file << "}\n";
+    file << "\n";
     file << "void " << class_name
-         << "::handleNewConnection(const HttpRequestPtr &req,const "
+         << "::handleNewConnection(const HttpRequestPtr &req, const "
             "WebSocketConnectionPtr& wsConnPtr)\n";
     file << "{\n";
-    file << "    //write your application logic here\n";
+    file << "    // write your application logic here\n";
     file << "}\n";
+    file << "\n";
     file << "void " << class_name
          << "::handleConnectionClosed(const WebSocketConnectionPtr& "
             "wsConnPtr)\n";
     file << "{\n";
-    file << "    //write your application logic here\n";
+    file << "    // write your application logic here\n";
     file << "}\n";
 }
 
@@ -239,8 +252,11 @@ void create_controller::newHttpControllerHeaderFile(
     const std::string &className)
 {
     file << "#pragma once\n";
+    file << "\n";
     file << "#include <drogon/HttpController.h>\n";
+    file << "\n";
     file << "using namespace drogon;\n";
+    file << "\n";
     std::string class_name = className;
     std::string namepace_path = "/";
     auto pos = class_name.find("::");
@@ -255,33 +271,33 @@ void create_controller::newHttpControllerHeaderFile(
         file << "{\n";
         pos = class_name.find("::");
     }
-    file << "class " << class_name << ":public drogon::HttpController<"
+    file << "class " << class_name << " : public drogon::HttpController<"
          << class_name << ">\n";
     file << "{\n";
     file << "  public:\n";
     file << "    METHOD_LIST_BEGIN\n";
-    file << "    //use METHOD_ADD to add your custom processing function "
+    file << "    // use METHOD_ADD to add your custom processing function "
             "here;\n";
-    file << "    //METHOD_ADD(" << class_name
-         << "::get,\"/{2}/{1}\",Get);"
-            "//path is "
+    file << "    // METHOD_ADD(" << class_name
+         << "::get, \"/{2}/{1}\", Get);"
+            " // path is "
          << namepace_path << class_name << "/{arg2}/{arg1}\n";
-    file << "    //METHOD_ADD(" << class_name
-         << "::your_method_name,\"/{1}/{2}/list\",Get);"
-            "//path is "
+    file << "    // METHOD_ADD(" << class_name
+         << "::your_method_name, \"/{1}/{2}/list\", Get);"
+            " // path is "
          << namepace_path << class_name << "/{arg1}/{arg2}/list\n";
-    file << "    //ADD_METHOD_TO(" << class_name
-         << "::your_method_name,\"/absolute/path/{1}/{2}/list\",Get);"
-            "//path is /absolute/path/{arg1}/{arg2}/list\n";
+    file << "    // ADD_METHOD_TO(" << class_name
+         << "::your_method_name, \"/absolute/path/{1}/{2}/list\", Get);"
+            " // path is /absolute/path/{arg1}/{arg2}/list\n";
     file << "\n";
     file << "    METHOD_LIST_END\n";
     file << "    // your declaration of processing function maybe like this:\n";
-    file << "    // void get(const HttpRequestPtr& req,"
-            "std::function<void (const HttpResponsePtr &)> &&callback,int "
-            "p1,std::string p2);\n";
-    file << "    // void your_method_name(const HttpRequestPtr& req,"
-            "std::function<void (const HttpResponsePtr &)> &&callback,double "
-            "p1,int p2) const;\n";
+    file << "    // void get(const HttpRequestPtr& req, "
+            "std::function<void (const HttpResponsePtr &)> &&callback, int "
+            "p1, std::string p2);\n";
+    file << "    // void your_method_name(const HttpRequestPtr& req, "
+            "std::function<void (const HttpResponsePtr &)> &&callback, double "
+            "p1, int p2) const;\n";
     file << "};\n";
     while (namespaceCount > 0)
     {
@@ -289,22 +305,25 @@ void create_controller::newHttpControllerHeaderFile(
         file << "}\n";
     }
 }
+
 void create_controller::newHttpControllerSourceFile(
     std::ofstream &file,
     const std::string &className,
     const std::string &filename)
 {
     file << "#include \"" << filename << ".h\"\n";
+    file << "\n";
     auto pos = className.rfind("::");
     auto class_name = className;
     if (pos != std::string::npos)
     {
         auto namespacename = className.substr(0, pos);
         file << "using namespace " << namespacename << ";\n";
+        file << "\n";
         class_name = className.substr(pos + 2);
     }
 
-    file << "//add definition of your processing function here\n";
+    file << "// Add definition of your processing function here\n";
 }
 
 void create_controller::createController(std::vector<std::string> &httpClasses,
@@ -360,20 +379,21 @@ void create_controller::createController(const std::string &className,
     }
     if (type == Http)
     {
-        std::cout << "create a http controller:" << className << std::endl;
+        std::cout << "Create a http controller: " << className << std::endl;
         newHttpControllerHeaderFile(oHeadFile, className);
         newHttpControllerSourceFile(oSourceFile, className, ctlName);
     }
     else if (type == Simple)
     {
-        std::cout << "create a http simple controller:" << className
+        std::cout << "Create a http simple controller: " << className
                   << std::endl;
         newSimpleControllerHeaderFile(oHeadFile, className);
         newSimpleControllerSourceFile(oSourceFile, className, ctlName);
     }
     else if (type == WebSocket)
     {
-        std::cout << "create a websocket controller:" << className << std::endl;
+        std::cout << "Create a websocket controller: " << className
+                  << std::endl;
         newWebsockControllerHeaderFile(oHeadFile, className);
         newWebsockControllerSourceFile(oSourceFile, className, ctlName);
     }
@@ -444,8 +464,8 @@ void create_controller::createARestfulController(const std::string &className,
         std::cerr << err.what() << std::endl;
         exit(1);
     }
-    std::cout << "create a http restful API controller:" << className
+    std::cout << "Create a http restful API controller: " << className
               << std::endl;
-    std::cout << "file name: " << ctlName << ".h and " << ctlName << ".cc"
+    std::cout << "File name: " << ctlName << ".h and " << ctlName << ".cc"
               << std::endl;
 }

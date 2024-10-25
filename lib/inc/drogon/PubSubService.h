@@ -1,7 +1,7 @@
 /**
  *
- *  PubSubService.h
- *  An Tao
+ *  @file PubSubService.h
+ *  @author An Tao
  *
  *  Copyright 2018, An Tao.  All rights reserved.
  *  https://github.com/an-tao/drogon
@@ -15,10 +15,12 @@
 #pragma once
 
 #include <trantor/utils/NonCopyable.h>
-#include <string>
-#include <unordered_map>
 #include <functional>
+#include <mutex>
 #include <shared_mutex>
+#include <string>
+#include <memory>
+#include <unordered_map>
 
 namespace drogon
 {
@@ -55,7 +57,7 @@ class Topic : public trantor::NonCopyable
     }
 
     /**
-     * @brief Subcribe to the topic.
+     * @brief Subscribe to the topic.
      *
      * @param handler is invoked when a message arrives.
      * @return SubscriberID
@@ -68,7 +70,7 @@ class Topic : public trantor::NonCopyable
     }
 
     /**
-     * @brief Subcribe to the topic.
+     * @brief Subscribe to the topic.
      *
      * @param handler is invoked when a message arrives.
      * @return SubscriberID
@@ -100,6 +102,7 @@ class Topic : public trantor::NonCopyable
         std::shared_lock<SharedMutex> lock(mutex_);
         return handlersMap_.empty();
     }
+
     /**
      * @brief Remove all subscribers from the topic.
      *
@@ -113,7 +116,7 @@ class Topic : public trantor::NonCopyable
   private:
     std::unordered_map<SubscriberID, MessageHandler> handlersMap_;
     mutable SharedMutex mutex_;
-    SubscriberID id_;
+    SubscriberID id_{0};
 };
 
 /**
@@ -172,6 +175,9 @@ class PubSubService : public trantor::NonCopyable
     /**
      * @brief Subscribe to a topic. When a message is published to the topic,
      * the handler is invoked by passing the topic and message as parameters.
+     * @param topicName Topic name.
+     * @param handler The message handler.
+     * @return The subscriber ID.
      */
     SubscriberID subscribe(const std::string &topicName,
                            MessageHandler &&handler)
@@ -186,7 +192,7 @@ class PubSubService : public trantor::NonCopyable
     /**
      * @brief Unsubscribe from a topic.
      *
-     * @param topic
+     * @param topicName Topic name.
      * @param id The subscriber ID returned from the subscribe method.
      */
     void unsubscribe(const std::string &topicName, SubscriberID id)
@@ -240,11 +246,37 @@ class PubSubService : public trantor::NonCopyable
         topicMap_.erase(topicName);
     }
 
+    /**
+     * @brief Check if a topic is empty.
+     *
+     * @param topicName The topic name.
+     * @return true means there are no subscribers.
+     * @return false means there are subscribers in the topic.
+     */
+    bool isTopicEmpty(const std::string &topicName) const
+    {
+        std::shared_ptr<Topic<MessageType>> topicPtr;
+        {
+            std::shared_lock<SharedMutex> lock(mutex_);
+            auto iter = topicMap_.find(topicName);
+            if (iter != topicMap_.end())
+            {
+                topicPtr = iter->second;
+            }
+            else
+            {
+                return true;
+            }
+        }
+        return topicPtr->empty();
+    }
+
   private:
     std::unordered_map<std::string, std::shared_ptr<Topic<MessageType>>>
         topicMap_;
     mutable SharedMutex mutex_;
     SubscriberID subID_ = 0;
+
     SubscriberID subscribeToTopic(
         const std::string &topicName,
         typename Topic<MessageType>::MessageHandler &&handler)

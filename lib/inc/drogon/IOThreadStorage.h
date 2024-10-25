@@ -1,7 +1,7 @@
 /**
  *
- *  IOThreadStorage.h
- *  Daniel Mensinger
+ *  @file IOThreadStorage.h
+ *  @author Daniel Mensinger
  *
  *  Copyright 2019, Daniel Mensinger.  All rights reserved.
  *  https://github.com/an-tao/drogon
@@ -64,17 +64,13 @@ class IOThreadStorage : public trantor::NonCopyable
     using InitCallback = std::function<void(ValueType &, size_t)>;
 
     template <typename... Args>
-    IOThreadStorage(Args &&... args)
+    IOThreadStorage(Args &&...args)
     {
         static_assert(std::is_constructible<C, Args &&...>::value,
                       "Unable to construct storage with given signature");
         size_t numThreads = app().getThreadNum();
-#ifdef _WIN32
-        assert(numThreads > 0 && numThreads != size_t(-1));
-#else
         assert(numThreads > 0 &&
-               numThreads != std::numeric_limits<size_t>::max());
-#endif
+               numThreads != (std::numeric_limits<size_t>::max)());
         // set the size to numThreads+1 to enable access to this in the main
         // thread.
         storage_.reserve(numThreads + 1);
@@ -94,7 +90,7 @@ class IOThreadStorage : public trantor::NonCopyable
     }
 
     /**
-     * @brief Get the thread storage asociate with the current thread
+     * @brief Get the thread storage associate with the current thread
      *
      * This function may only be called in a request handler
      */
@@ -159,4 +155,14 @@ class IOThreadStorage : public trantor::NonCopyable
     std::vector<ValueType> storage_;
 };
 
+inline trantor::EventLoop *getIOThreadStorageLoop(size_t index) noexcept(false)
+{
+    if (index > drogon::app().getThreadNum())
+    {
+        throw std::out_of_range("Event loop index is out of range");
+    }
+    if (index == drogon::app().getThreadNum())
+        return drogon::app().getLoop();
+    return drogon::app().getIOLoop(index);
+}
 }  // namespace drogon

@@ -1,7 +1,7 @@
 /**
  *
- *  HttpViewData.h
- *  An Tao
+ *  @file HttpViewData.h
+ *  @author An Tao
  *
  *  Copyright 2018, An Tao.  All rights reserved.
  *  https://github.com/an-tao/drogon
@@ -14,8 +14,7 @@
 
 #pragma once
 
-#include <drogon/utils/string_view.h>
-#include <drogon/utils/any.h>
+#include <drogon/exports.h>
 #include <trantor/utils/Logger.h>
 #include <trantor/utils/MsgBuffer.h>
 #include <sstream>
@@ -23,11 +22,14 @@
 #include <unordered_map>
 #include <stdarg.h>
 #include <stdio.h>
+#include <type_traits>
+#include <any>
+#include <string_view>
 
 namespace drogon
 {
 /// This class represents the data set displayed in views.
-class HttpViewData
+class DROGON_EXPORT HttpViewData
 {
   public:
     /// The function template is used to get an item in the data set by the key
@@ -35,13 +37,13 @@ class HttpViewData
     template <typename T>
     const T &get(const std::string &key) const
     {
-        const static T nullVal = T();
+        static const T nullVal = T();
         auto it = viewData_.find(key);
         if (it != viewData_.end())
         {
             if (typeid(T) == it->second.type())
             {
-                return *(any_cast<T>(&(it->second)));
+                return *(std::any_cast<T>(&(it->second)));
             }
             else
             {
@@ -52,11 +54,12 @@ class HttpViewData
     }
 
     /// Insert an item identified by the key parameter into the data set;
-    void insert(const std::string &key, any &&obj)
+    void insert(const std::string &key, std::any &&obj)
     {
         viewData_[key] = std::move(obj);
     }
-    void insert(const std::string &key, const any &obj)
+
+    void insert(const std::string &key, const std::any &obj)
     {
         viewData_[key] = obj;
     }
@@ -71,7 +74,7 @@ class HttpViewData
         viewData_[key] = ss.str();
     }
 
-    /// Insert a formated string identified by the key parameter.
+    /// Insert a formatted string identified by the key parameter.
     void insertFormattedString(const std::string &key, const char *format, ...)
     {
         std::string strBuffer;
@@ -105,10 +108,10 @@ class HttpViewData
                 }
 
                 va_copy(backup_ap, ap);
-                auto result = vsnprintf((char *)strBuffer.data(),
-                                        strBuffer.size(),
-                                        format,
-                                        backup_ap);
+                result = vsnprintf((char *)strBuffer.data(),
+                                   strBuffer.size(),
+                                   format,
+                                   backup_ap);
                 va_end(backup_ap);
 
                 if ((result >= 0) &&
@@ -124,7 +127,7 @@ class HttpViewData
     }
 
     /// Get the 'any' object by the key parameter.
-    any &operator[](const std::string &key) const
+    std::any &operator[](const std::string &key) const
     {
         return viewData_[key];
     }
@@ -140,32 +143,13 @@ class HttpViewData
        @endcode
      */
     static std::string htmlTranslate(const char *str, size_t length);
-    static std::string htmlTranslate(const std::string &str)
+
+    static std::string htmlTranslate(const std::string_view &str)
     {
         return htmlTranslate(str.data(), str.length());
     }
-    static std::string htmlTranslate(const string_view &str)
-    {
-        return htmlTranslate(str.data(), str.length());
-    }
-    static bool needTranslation(const std::string &str)
-    {
-        for (auto const &c : str)
-        {
-            switch (c)
-            {
-                case '"':
-                case '&':
-                case '<':
-                case '>':
-                    return true;
-                default:
-                    continue;
-            }
-        }
-        return false;
-    }
-    static bool needTranslation(const string_view &str)
+
+    static bool needTranslation(const std::string_view &str)
     {
         for (auto const &c : str)
         {
@@ -184,7 +168,7 @@ class HttpViewData
     }
 
   protected:
-    using ViewDataMap = std::unordered_map<std::string, any>;
+    using ViewDataMap = std::unordered_map<std::string, std::any>;
     mutable ViewDataMap viewData_;
 };
 

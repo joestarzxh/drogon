@@ -21,23 +21,24 @@ AlwaysBreakTemplateDeclarations: true
 BinPackArguments: false
 BinPackParameters: false 
 BraceWrapping:   
-  AfterClass:      false
-  AfterControlStatement: false
-  AfterEnum:       false
-  AfterFunction:   false
-  AfterNamespace:  false
+  AfterClass:      true
+  AfterControlStatement: Always
+  AfterEnum:       true
+  AfterFunction:   true
+  AfterNamespace:  true
   AfterObjCDeclaration: false
-  AfterStruct:     false
-  AfterUnion:      false
-  AfterExternBlock: false
-  BeforeCatch:     false
-  BeforeElse:      false
+  AfterStruct:     true
+  AfterUnion:      true
+  AfterExternBlock: true
+  BeforeCatch:     true
+  BeforeElse:      true
   IndentBraces:    false
   SplitEmptyFunction: true
   SplitEmptyRecord: true
   SplitEmptyNamespace: true
+  AfterCaseLabel: true
 BreakBeforeBinaryOperators: None
-BreakBeforeBraces: Allman
+BreakBeforeBraces: Custom
 BreakBeforeInheritanceComma: false
 BreakInheritanceList: BeforeColon
 BreakBeforeTernaryOperators: true
@@ -52,7 +53,7 @@ ConstructorInitializerAllOnOneLineOrOnePerLine: true
 ConstructorInitializerIndentWidth: 4
 ContinuationIndentWidth: 4
 Cpp11BracedListStyle: true
-DerivePointerAlignment: true
+DerivePointerAlignment: false 
 DisableFormat:   false
 FixNamespaceComments: true
 ForEachMacros:   
@@ -74,6 +75,7 @@ IndentCaseLabels: true
 IndentPPDirectives: None
 IndentWidth:    4 
 IndentWrappedFunctionNames: false
+InsertNewlineAtEOF: true
 JavaScriptQuotes: Leave
 JavaScriptWrapImports: true
 KeepEmptyLinesAtTheStartOfBlocks: false
@@ -93,7 +95,8 @@ PenaltyBreakString: 1000
 PenaltyBreakTemplateDeclaration: 10
 PenaltyExcessCharacter: 1000000
 PenaltyReturnTypeOnItsOwnLine: 2000
-PointerAlignment: Left
+PointerAlignment: Right 
+ReferenceAlignment: Right 
 RawStringFormats: 
   - Language:        Cpp
     Delimiters:      
@@ -123,7 +126,8 @@ RawStringFormats:
     CanonicalDelimiter: ''
     BasedOnStyle:    google
 ReflowComments:  true
-SortIncludes:    false
+SeparateDefinitionBlocks: Always
+SortIncludes:    Never
 SortUsingDeclarations: true
 SpaceAfterCStyleCast: false
 SpaceAfterTemplateKeyword: true

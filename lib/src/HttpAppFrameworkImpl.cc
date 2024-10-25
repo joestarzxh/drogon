@@ -1,7 +1,7 @@
 /**
  *
  *  @file HttpAppFrameworkImpl.cc
- *  An Tao
+ *  @author An Tao
  *
  *  Copyright 2018, An Tao.  All rights reserved.
  *  https://github.com/an-tao/drogon
@@ -13,79 +13,76 @@
  */
 
 #include "HttpAppFrameworkImpl.h"
-#include "HttpRequestImpl.h"
-#include "HttpClientImpl.h"
-#include "HttpResponseImpl.h"
-#include "WebSocketConnectionImpl.h"
-#include "StaticFileRouter.h"
-#include "HttpSimpleControllersRouter.h"
-#include "HttpControllersRouter.h"
-#include "WebsocketControllersRouter.h"
-#include "HttpClientImpl.h"
-#include "AOPAdvice.h"
-#include "ConfigLoader.h"
-#include "HttpServer.h"
-#include "PluginsManager.h"
-#include "ListenerManager.h"
-#include "SharedLibManager.h"
-#include "SessionManager.h"
-#include "DbClientManager.h"
-#include <drogon/config.h>
-#include <algorithm>
-#include <drogon/version.h>
-#include <drogon/CacheMap.h>
 #include <drogon/DrClassMap.h>
-#include <drogon/HttpRequest.h>
 #include <drogon/HttpResponse.h>
 #include <drogon/HttpTypes.h>
-#include <drogon/Session.h>
 #include <drogon/utils/Utilities.h>
-#include <trantor/utils/AsyncFileLogger.h>
+#include <drogon/version.h>
 #include <json/json.h>
+#include <trantor/utils/AsyncFileLogger.h>
+#include <algorithm>
+#include "AOPAdvice.h"
+#include "ConfigLoader.h"
+#include "DbClientManager.h"
+#include "HttpClientImpl.h"
+#include "HttpConnectionLimit.h"
+#include "HttpControllersRouter.h"
+#include "HttpRequestImpl.h"
+#include "HttpResponseImpl.h"
+#include "HttpServer.h"
+#include "HttpUtils.h"
+#include "ListenerManager.h"
+#include "PluginsManager.h"
+#include "RedisClientManager.h"
+#include "SessionManager.h"
+#include "SharedLibManager.h"
+#include "StaticFileRouter.h"
 
-#include <fstream>
 #include <iostream>
 #include <memory>
+#include <tuple>
 #include <unordered_map>
 #include <utility>
-#include <tuple>
+#include <filesystem>
 
 #include <fcntl.h>
 #include <sys/stat.h>
-#include <sys/types.h>
 #ifndef _WIN32
 #include <sys/wait.h>
-#include <sys/file.h>
-#include <uuid.h>
 #include <unistd.h>
+#define os_access access
+#elif !defined(_WIN32) || defined(__MINGW32__)
+#include <sys/file.h>
+#include <unistd.h>
+#define os_access access
 #else
 #include <io.h>
+#define os_access _waccess
+#define R_OK 04
+#define W_OK 02
 #endif
+
+#ifdef DROGON_SPDLOG_SUPPORT
+#include <spdlog/spdlog.h>
+#include <spdlog/logger.h>
+#include <spdlog/sinks/stdout_color_sinks.h>
+#include <spdlog/sinks/rotating_file_sink.h>
+#ifdef _WIN32
+#include <spdlog/sinks/msvc_sink.h>
+// Damn antedeluvian M$ macros
+#undef min
+#undef max
+#endif
+#endif  // DROGON_SPDLOG_SUPPORT
 
 using namespace drogon;
 using namespace std::placeholders;
 
 HttpAppFrameworkImpl::HttpAppFrameworkImpl()
-    : staticFileRouterPtr_(new StaticFileRouter{}),
-      httpCtrlsRouterPtr_(new HttpControllersRouter(*staticFileRouterPtr_,
-                                                    postRoutingAdvices_,
-                                                    postRoutingObservers_,
-                                                    preHandlingAdvices_,
-                                                    preHandlingObservers_,
-                                                    postHandlingAdvices_)),
-      httpSimpleCtrlsRouterPtr_(
-          new HttpSimpleControllersRouter(*httpCtrlsRouterPtr_,
-                                          postRoutingAdvices_,
-                                          postRoutingObservers_,
-                                          preHandlingAdvices_,
-                                          preHandlingObservers_,
-                                          postHandlingAdvices_)),
-      websockCtrlsRouterPtr_(
-          new WebsocketControllersRouter(postRoutingAdvices_,
-                                         postRoutingObservers_)),
-      listenerManagerPtr_(new ListenerManager),
+    : listenerManagerPtr_(new ListenerManager),
       pluginsManagerPtr_(new PluginsManager),
       dbClientManagerPtr_(new orm::DbClientManager),
+      redisClientManagerPtr_(new nosql::RedisClientManager),
       uploadPath_(rootPath_ + "uploads")
 {
 }
@@ -111,12 +108,26 @@ std::string getGitCommit()
     return DROGON_VERSION_SHA1;
 }
 
-HttpResponsePtr defaultErrorHandler(HttpStatusCode code)
+HttpResponsePtr defaultErrorHandler(HttpStatusCode code, const HttpRequestPtr &)
 {
     return std::make_shared<HttpResponseImpl>(code, CT_TEXT_HTML);
 }
 
-static void godaemon(void)
+void defaultExceptionHandler(
+    const std::exception &e,
+    const HttpRequestPtr &req,
+    std::function<void(const HttpResponsePtr &)> &&callback)
+{
+    std::string pathWithQuery = req->path();
+    if (req->query().empty() == false)
+        pathWithQuery += "?" + req->query();
+    LOG_ERROR << "Unhandled exception in " << pathWithQuery
+              << ", what(): " << e.what();
+    const auto &handler = app().getCustomErrorHandler();
+    callback(handler(k500InternalServerError, req));
+}
+
+static void godaemon()
 {
     printf("Initializing daemon mode\n");
 #ifndef _WIN32
@@ -161,6 +172,11 @@ static void TERMFunction(int sig)
         LOG_WARN << "SIGTERM signal received.";
         HttpAppFrameworkImpl::instance().getTermSignalHandler()();
     }
+    else if (sig == SIGINT)
+    {
+        LOG_WARN << "SIGINT signal received.";
+        HttpAppFrameworkImpl::instance().getIntSignalHandler()();
+    }
 }
 
 }  // namespace drogon
@@ -173,24 +189,52 @@ HttpAppFrameworkImpl::~HttpAppFrameworkImpl() noexcept
 #endif
     sessionManagerPtr_.reset();
 }
+
 HttpAppFramework &HttpAppFrameworkImpl::setStaticFilesCacheTime(int cacheTime)
 {
-    staticFileRouterPtr_->setStaticFilesCacheTime(cacheTime);
+    StaticFileRouter::instance().setStaticFilesCacheTime(cacheTime);
     return *this;
 }
+
 int HttpAppFrameworkImpl::staticFilesCacheTime() const
 {
-    return staticFileRouterPtr_->staticFilesCacheTime();
+    return StaticFileRouter::instance().staticFilesCacheTime();
 }
+
 HttpAppFramework &HttpAppFrameworkImpl::setGzipStatic(bool useGzipStatic)
 {
-    staticFileRouterPtr_->setGzipStatic(useGzipStatic);
+    StaticFileRouter::instance().setGzipStatic(useGzipStatic);
     return *this;
 }
+
 HttpAppFramework &HttpAppFrameworkImpl::setBrStatic(bool useGzipStatic)
 {
-    staticFileRouterPtr_->setBrStatic(useGzipStatic);
+    StaticFileRouter::instance().setBrStatic(useGzipStatic);
     return *this;
+}
+
+HttpAppFramework &HttpAppFrameworkImpl::setImplicitPageEnable(
+    bool useImplicitPage)
+{
+    StaticFileRouter::instance().setImplicitPageEnable(useImplicitPage);
+    return *this;
+}
+
+bool HttpAppFrameworkImpl::isImplicitPageEnabled() const
+{
+    return StaticFileRouter::instance().isImplicitPageEnabled();
+}
+
+HttpAppFramework &HttpAppFrameworkImpl::setImplicitPage(
+    const std::string &implicitPageFile)
+{
+    StaticFileRouter::instance().setImplicitPage(implicitPageFile);
+    return *this;
+}
+
+const std::string &HttpAppFrameworkImpl::getImplicitPage() const
+{
+    return StaticFileRouter::instance().getImplicitPage();
 }
 #ifndef _WIN32
 HttpAppFramework &HttpAppFrameworkImpl::enableDynamicViewsLoading(
@@ -234,30 +278,42 @@ HttpAppFramework &HttpAppFrameworkImpl::enableDynamicViewsLoading(
 HttpAppFramework &HttpAppFrameworkImpl::setFileTypes(
     const std::vector<std::string> &types)
 {
-    staticFileRouterPtr_->setFileTypes(types);
+    StaticFileRouter::instance().setFileTypes(types);
     return *this;
 }
 
 HttpAppFramework &HttpAppFrameworkImpl::registerWebSocketController(
     const std::string &pathName,
     const std::string &ctrlName,
-    const std::vector<internal::HttpConstraint> &filtersAndMethods)
+    const std::vector<internal::HttpConstraint> &constraints)
 {
-    assert(!running_);
-    websockCtrlsRouterPtr_->registerWebSocketController(pathName,
-                                                        ctrlName,
-                                                        filtersAndMethods);
+    assert(!routersInit_);
+    HttpControllersRouter::instance().registerWebSocketController(pathName,
+                                                                  ctrlName,
+                                                                  constraints);
     return *this;
 }
+
+HttpAppFramework &HttpAppFrameworkImpl::registerWebSocketControllerRegex(
+    const std::string &regExp,
+    const std::string &ctrlName,
+    const std::vector<internal::HttpConstraint> &constraints)
+{
+    assert(!routersInit_);
+    HttpControllersRouter::instance().registerWebSocketControllerRegex(
+        regExp, ctrlName, constraints);
+    return *this;
+}
+
 HttpAppFramework &HttpAppFrameworkImpl::registerHttpSimpleController(
     const std::string &pathName,
     const std::string &ctrlName,
-    const std::vector<internal::HttpConstraint> &filtersAndMethods)
+    const std::vector<internal::HttpConstraint> &constraints)
 {
-    assert(!running_);
-    httpSimpleCtrlsRouterPtr_->registerHttpSimpleController(pathName,
-                                                            ctrlName,
-                                                            filtersAndMethods);
+    assert(!routersInit_);
+    HttpControllersRouter::instance().registerHttpSimpleController(pathName,
+                                                                   ctrlName,
+                                                                   constraints);
     return *this;
 }
 
@@ -265,28 +321,28 @@ void HttpAppFrameworkImpl::registerHttpController(
     const std::string &pathPattern,
     const internal::HttpBinderBasePtr &binder,
     const std::vector<HttpMethod> &validMethods,
-    const std::vector<std::string> &filters,
+    const std::vector<std::string> &middlewareNames,
     const std::string &handlerName)
 {
     assert(!pathPattern.empty());
     assert(binder);
-    assert(!running_);
-    httpCtrlsRouterPtr_->addHttpPath(
-        pathPattern, binder, validMethods, filters, handlerName);
+    assert(!routersInit_);
+    HttpControllersRouter::instance().addHttpPath(
+        pathPattern, binder, validMethods, middlewareNames, handlerName);
 }
 
 void HttpAppFrameworkImpl::registerHttpControllerViaRegex(
     const std::string &regExp,
     const internal::HttpBinderBasePtr &binder,
     const std::vector<HttpMethod> &validMethods,
-    const std::vector<std::string> &filters,
+    const std::vector<std::string> &middlewareNames,
     const std::string &handlerName)
 {
     assert(!regExp.empty());
     assert(binder);
-    assert(!running_);
-    httpCtrlsRouterPtr_->addHttpRegex(
-        regExp, binder, validMethods, filters, handlerName);
+    assert(!routersInit_);
+    HttpControllersRouter::instance().addHttpRegex(
+        regExp, binder, validMethods, middlewareNames, handlerName);
 }
 
 HttpAppFramework &HttpAppFrameworkImpl::setThreadNum(size_t threadNum)
@@ -299,32 +355,78 @@ HttpAppFramework &HttpAppFrameworkImpl::setThreadNum(size_t threadNum)
     threadNum_ = threadNum;
     return *this;
 }
+
 PluginBase *HttpAppFrameworkImpl::getPlugin(const std::string &name)
 {
     return pluginsManagerPtr_->getPlugin(name);
 }
-HttpAppFramework &HttpAppFrameworkImpl::addListener(const std::string &ip,
-                                                    uint16_t port,
-                                                    bool useSSL,
-                                                    const std::string &certFile,
-                                                    const std::string &keyFile)
+
+std::shared_ptr<PluginBase> HttpAppFrameworkImpl::getSharedPlugin(
+    const std::string &name)
+{
+    return pluginsManagerPtr_->getSharedPlugin(name);
+}
+
+void HttpAppFrameworkImpl::addPlugin(
+    const std::string &name,
+    const std::vector<std::string> &dependencies,
+    const Json::Value &config)
+{
+    assert(!isRunning());
+    Json::Value pluginConfig;
+    pluginConfig["name"] = name;
+    Json::Value deps(Json::arrayValue);
+    for (const auto dep : dependencies)
+    {
+        deps.append(dep);
+    }
+    pluginConfig["dependencies"] = deps;
+    pluginConfig["config"] = config;
+    auto &plugins = jsonRuntimeConfig_["plugins"];
+    plugins.append(pluginConfig);
+}
+
+void HttpAppFrameworkImpl::addPlugins(const Json::Value &configs)
+{
+    assert(!isRunning());
+    assert(configs.isArray());
+    auto &plugins = jsonRuntimeConfig_["plugins"];
+    for (const auto config : configs)
+    {
+        plugins.append(config);
+    }
+}
+
+HttpAppFramework &HttpAppFrameworkImpl::addListener(
+    const std::string &ip,
+    uint16_t port,
+    bool useSSL,
+    const std::string &certFile,
+    const std::string &keyFile,
+    bool useOldTLS,
+    const std::vector<std::pair<std::string, std::string>> &sslConfCmds)
 {
     assert(!running_);
-    listenerManagerPtr_->addListener(ip, port, useSSL, certFile, keyFile);
+    listenerManagerPtr_->addListener(
+        ip, port, useSSL, certFile, keyFile, useOldTLS, sslConfCmds);
     return *this;
 }
+
 HttpAppFramework &HttpAppFrameworkImpl::setMaxConnectionNum(
     size_t maxConnections)
 {
-    maxConnectionNum_ = maxConnections;
+    HttpConnectionLimit::instance().setMaxConnectionNum(maxConnections);
     return *this;
 }
+
 HttpAppFramework &HttpAppFrameworkImpl::setMaxConnectionNumPerIP(
     size_t maxConnectionsPerIP)
 {
-    maxConnectionNumPerIP_ = maxConnectionsPerIP;
+    HttpConnectionLimit::instance().setMaxConnectionNumPerIP(
+        maxConnectionsPerIP);
     return *this;
 }
+
 HttpAppFramework &HttpAppFrameworkImpl::loadConfigFile(
     const std::string &fileName)
 {
@@ -333,6 +435,7 @@ HttpAppFramework &HttpAppFrameworkImpl::loadConfigFile(
     jsonConfig_ = loader.jsonValue();
     return *this;
 }
+
 HttpAppFramework &HttpAppFrameworkImpl::loadConfigJson(const Json::Value &data)
 {
     ConfigLoader loader(data);
@@ -340,6 +443,7 @@ HttpAppFramework &HttpAppFrameworkImpl::loadConfigJson(const Json::Value &data)
     jsonConfig_ = loader.jsonValue();
     return *this;
 }
+
 HttpAppFramework &HttpAppFrameworkImpl::loadConfigJson(Json::Value &&data)
 {
     ConfigLoader loader(std::move(data));
@@ -347,27 +451,27 @@ HttpAppFramework &HttpAppFrameworkImpl::loadConfigJson(Json::Value &&data)
     jsonConfig_ = loader.jsonValue();
     return *this;
 }
+
 HttpAppFramework &HttpAppFrameworkImpl::setLogPath(
     const std::string &logPath,
     const std::string &logfileBaseName,
-    size_t logfileSize)
+    size_t logfileSize,
+    size_t maxFiles,
+    bool useSpdlog)
 {
-    if (logPath == "")
-        return *this;
-#ifdef _WIN32
-    if (_access(logPath.c_str(), 0) != 0)
-#else
-    if (access(logPath.c_str(), 0) != 0)
+#ifdef DROGON_SPDLOG_SUPPORT
+    logWithSpdlog_ = trantor::Logger::hasSpdLogSupport() && useSpdlog;
 #endif
+    if (logPath.empty())
+        return *this;
+    // std::filesystem does not provide a method to check access permissions, so
+    // keep existing code
+    if (os_access(utils::toNativePath(logPath).c_str(), 0) != 0)
     {
         std::cerr << "Log path does not exist!\n";
         exit(1);
     }
-#ifdef _WIN32
-    if (_access(logPath.c_str(), 06) != 0)
-#else
-    if (access(logPath.c_str(), R_OK | W_OK) != 0)
-#endif
+    if (os_access(utils::toNativePath(logPath).c_str(), R_OK | W_OK) != 0)
     {
         std::cerr << "Unable to access log path!\n";
         exit(1);
@@ -375,19 +479,41 @@ HttpAppFramework &HttpAppFrameworkImpl::setLogPath(
     logPath_ = logPath;
     logfileBaseName_ = logfileBaseName;
     logfileSize_ = logfileSize;
+    logfileMaxNum_ = maxFiles;
     return *this;
 }
+
 HttpAppFramework &HttpAppFrameworkImpl::setLogLevel(
     trantor::Logger::LogLevel level)
 {
     trantor::Logger::setLogLevel(level);
     return *this;
 }
+
+HttpAppFramework &HttpAppFrameworkImpl::setLogLocalTime(bool on)
+{
+    trantor::Logger::setDisplayLocalTime(on);
+    return *this;
+}
+
+HttpAppFramework &HttpAppFrameworkImpl::setSSLConfigCommands(
+    const std::vector<std::pair<std::string, std::string>> &sslConfCmds)
+{
+    sslConfCmds_ = sslConfCmds;
+    return *this;
+}
+
 HttpAppFramework &HttpAppFrameworkImpl::setSSLFiles(const std::string &certPath,
                                                     const std::string &keyPath)
 {
     sslCertPath_ = certPath;
     sslKeyPath_ = keyPath;
+    return *this;
+}
+
+HttpAppFramework &HttpAppFrameworkImpl::reloadSSLFiles()
+{
+    listenerManagerPtr_->reloadSSLFiles();
     return *this;
 }
 
@@ -398,13 +524,14 @@ void HttpAppFrameworkImpl::run()
         getLoop()->moveToCurrentThread();
     }
     LOG_TRACE << "Start to run...";
-    trantor::AsyncFileLogger asyncFileLogger;
     // Create dirs for cache files
     for (int i = 0; i < 256; ++i)
     {
         char dirName[4];
         snprintf(dirName, sizeof(dirName), "%02x", i);
-        std::transform(dirName, dirName + 2, dirName, toupper);
+        std::transform(dirName, dirName + 2, dirName, [](unsigned char c) {
+            return toupper(c);
+        });
         utils::createPath(getUploadPath() + "/tmp/" + dirName);
     }
     if (runAsDaemon_)
@@ -438,86 +565,99 @@ void HttpAppFrameworkImpl::run()
             sleep(1);
             LOG_INFO << "start new process";
         }
+#ifdef __linux__
+        getLoop()->resetTimerQueue();
+#endif
         getLoop()->resetAfterFork();
 #endif
     }
-    signal(SIGTERM, TERMFunction);
-    // set logger
-    if (!logPath_.empty())
+    if (handleSigterm_)
     {
-#ifdef _WIN32
-        if (_access(logPath_.c_str(), 06) != 0)
+#ifdef WIN32
+        signal(SIGTERM, TERMFunction);
+        signal(SIGINT, TERMFunction);
 #else
-        if (access(logPath_.c_str(), R_OK | W_OK) != 0)
-#endif
+        struct sigaction sa;
+        sa.sa_handler = TERMFunction;
+        sigemptyset(&sa.sa_mask);
+        sa.sa_flags = 0;
+        if (sigaction(SIGINT, &sa, NULL) == -1)
         {
-            LOG_ERROR << "log file path not exist";
+            LOG_ERROR << "sigaction() failed, can't set SIGINT handler";
             abort();
         }
-        else
+        if (sigaction(SIGTERM, &sa, NULL) == -1)
         {
-            std::string baseName = logfileBaseName_;
-            if (baseName == "")
-            {
-                baseName = "drogon";
-            }
-            asyncFileLogger.setFileName(baseName, ".log", logPath_);
-            asyncFileLogger.startLogging();
-            trantor::Logger::setOutputFunction(
-                [&](const char *msg, const uint64_t len) {
-                    asyncFileLogger.output(msg, len);
-                },
-                [&]() { asyncFileLogger.flush(); });
-            asyncFileLogger.setFileSizeLimit(logfileSize_);
+            LOG_ERROR << "sigaction() failed, can't set SIGTERM handler";
+            abort();
         }
+#endif
     }
+    setupFileLogger();
     if (relaunchOnError_)
     {
         LOG_INFO << "Start child process";
     }
-    // now start runing!!
 
-    running_ = true;
 #ifndef _WIN32
     if (!libFilePaths_.empty())
     {
-        sharedLibManagerPtr_ = std::unique_ptr<SharedLibManager>(
-            new SharedLibManager(libFilePaths_, libFileOutputPath_));
+        sharedLibManagerPtr_ =
+            std::make_unique<SharedLibManager>(libFilePaths_,
+                                               libFileOutputPath_);
     }
 #endif
-    // Create all listeners.
-    auto ioLoops = listenerManagerPtr_->createListeners(
-        std::bind(&HttpAppFrameworkImpl::onAsyncRequest, this, _1, _2),
-        std::bind(&HttpAppFrameworkImpl::onNewWebsockRequest, this, _1, _2, _3),
-        std::bind(&HttpAppFrameworkImpl::onConnection, this, _1),
-        idleConnectionTimeout_,
-        sslCertPath_,
-        sslKeyPath_,
-        threadNum_,
-        syncAdvices_);
-    assert(ioLoops.size() == threadNum_);
+
+    // Create IO threads
+    ioLoopThreadPool_ =
+        std::make_unique<trantor::EventLoopThreadPool>(threadNum_,
+                                                       "DrogonIoLoop");
+    std::vector<trantor::EventLoop *> ioLoops = ioLoopThreadPool_->getLoops();
     for (size_t i = 0; i < threadNum_; ++i)
     {
         ioLoops[i]->setIndex(i);
     }
     getLoop()->setIndex(threadNum_);
+
+    // Create all listeners.
+    listenerManagerPtr_->createListeners(sslCertPath_,
+                                         sslKeyPath_,
+                                         sslConfCmds_,
+                                         ioLoops);
+
     // A fast database client instance should be created in the main event
     // loop, so put the main loop into ioLoops.
     ioLoops.push_back(getLoop());
     dbClientManagerPtr_->createDbClients(ioLoops);
-    httpCtrlsRouterPtr_->init(ioLoops);
-    httpSimpleCtrlsRouterPtr_->init(ioLoops);
-    staticFileRouterPtr_->init(ioLoops);
-    websockCtrlsRouterPtr_->init();
-
+    redisClientManagerPtr_->createRedisClients(ioLoops);
     if (useSession_)
     {
-        sessionManagerPtr_ = std::unique_ptr<SessionManager>(
-            new SessionManager(getLoop(), sessionTimeout_));
+        sessionManagerPtr_ =
+            std::make_unique<SessionManager>(getLoop(),
+                                             sessionTimeout_,
+                                             sessionStartAdvices_,
+                                             sessionDestroyAdvices_,
+                                             sessionIdGeneratorCallback_);
     }
-
+    // now start running!!
+    running_ = true;
     // Initialize plugins
-    const auto &pluginConfig = jsonConfig_["plugins"];
+    auto &pluginConfig = jsonConfig_["plugins"];
+    const auto &runtimePluginConfig = jsonRuntimeConfig_["plugins"];
+    if (!pluginConfig.isNull())
+    {
+        if (!runtimePluginConfig.isNull() && runtimePluginConfig.isArray())
+        {
+            for (const auto &plugin : runtimePluginConfig)
+            {
+                pluginConfig.append(plugin);
+            }
+        }
+    }
+    else
+    {
+        jsonConfig_["plugins"] = runtimePluginConfig;
+    }
     if (!pluginConfig.isNull())
     {
         pluginsManagerPtr_->initializeAllPlugins(pluginConfig,
@@ -528,178 +668,74 @@ void HttpAppFrameworkImpl::run()
                                                      // TODO: new plugin
                                                  });
     }
+    routersInit_ = true;
+    HttpControllersRouter::instance().init(ioLoops);
+    StaticFileRouter::instance().init(ioLoops);
     getLoop()->queueInLoop([this]() {
-        // Let listener event loops run when everything is ready.
-        listenerManagerPtr_->startListening();
         for (auto &adv : beginningAdvices_)
         {
             adv();
         }
         beginningAdvices_.clear();
+        // Let listener event loops run when everything is ready.
+        listenerManagerPtr_->startListening();
     });
+    // start all loops
+    // TODO: when should IOLoops start?
+    // In before, IOLoops are started in `listenerManagerPtr_->startListening()`
+    // It should be fine for them to start anywhere before `startListening()`.
+    // However, we should consider other components.
+    ioLoopThreadPool_->start();
     getLoop()->loop();
-}
-
-void HttpAppFrameworkImpl::onConnection(const trantor::TcpConnectionPtr &conn)
-{
-    static std::mutex mtx;
-    LOG_TRACE << "connect!!!" << maxConnectionNum_
-              << " num=" << connectionNum_.load();
-    if (conn->connected())
-    {
-        if (connectionNum_.fetch_add(1, std::memory_order_relaxed) >=
-            maxConnectionNum_)
-        {
-            LOG_ERROR << "too much connections!force close!";
-            conn->forceClose();
-            return;
-        }
-        else if (maxConnectionNumPerIP_ > 0)
-        {
-            {
-                std::lock_guard<std::mutex> lock(mtx);
-                auto iter = connectionsNumMap_.find(conn->peerAddr().toIp());
-                if (iter == connectionsNumMap_.end())
-                {
-                    connectionsNumMap_[conn->peerAddr().toIp()] = 1;
-                }
-                else if (iter->second++ > maxConnectionNumPerIP_)
-                {
-                    conn->getLoop()->queueInLoop(
-                        [conn]() { conn->forceClose(); });
-                    return;
-                }
-            }
-        }
-        for (auto &advice : newConnectionAdvices_)
-        {
-            if (!advice(conn->peerAddr(), conn->localAddr()))
-            {
-                conn->forceClose();
-                return;
-            }
-        }
-    }
-    else
-    {
-        if (!conn->hasContext())
-        {
-            // If the connection is connected to the SSL port and then
-            // disconnected before the SSL handshake.
-            return;
-        }
-        connectionNum_.fetch_sub(1, std::memory_order_relaxed);
-        if (maxConnectionNumPerIP_ > 0)
-        {
-            std::lock_guard<std::mutex> lock(mtx);
-            auto iter = connectionsNumMap_.find(conn->peerAddr().toIp());
-            if (iter != connectionsNumMap_.end())
-            {
-                --iter->second;
-                if (iter->second <= 0)
-                {
-                    connectionsNumMap_.erase(iter);
-                }
-            }
-        }
-    }
 }
 
 HttpAppFramework &HttpAppFrameworkImpl::setUploadPath(
     const std::string &uploadPath)
 {
     assert(!uploadPath.empty());
-    if (uploadPath[0] == '/' ||
-        (uploadPath.length() >= 2 && uploadPath[0] == '.' &&
-         uploadPath[1] == '/') ||
-        (uploadPath.length() >= 3 && uploadPath[0] == '.' &&
-         uploadPath[1] == '.' && uploadPath[2] == '/') ||
-        uploadPath == "." || uploadPath == "..")
+
+    std::filesystem::path fsUploadPath(utils::toNativePath(uploadPath));
+    if (!fsUploadPath.is_absolute())
     {
-        uploadPath_ = uploadPath;
+        std::filesystem::path fsRoot(utils::toNativePath(rootPath_));
+        fsUploadPath = fsRoot / fsUploadPath;
     }
-    else
-    {
-        if (rootPath_[rootPath_.length() - 1] == '/')
-            uploadPath_ = rootPath_ + uploadPath;
-        else
-            uploadPath_ = rootPath_ + "/" + uploadPath;
-    }
+    uploadPath_ = utils::fromNativePath(fsUploadPath.native());
     return *this;
 }
+
 void HttpAppFrameworkImpl::findSessionForRequest(const HttpRequestImplPtr &req)
 {
     if (useSession_)
     {
-        std::string sessionId = req->getCookie("JSESSIONID");
-        bool needSetJsessionid = false;
+        std::string sessionId = req->getCookie(sessionCookieKey_);
+        bool needSetSessionid = false;
         if (sessionId.empty())
         {
-            sessionId = utils::getUuid();
-            needSetJsessionid = true;
+            sessionId = sessionIdGeneratorCallback_();
+            needSetSessionid = true;
         }
         req->setSession(
-            sessionManagerPtr_->getSession(sessionId, needSetJsessionid));
-    }
-}
-void HttpAppFrameworkImpl::onNewWebsockRequest(
-    const HttpRequestImplPtr &req,
-    std::function<void(const HttpResponsePtr &)> &&callback,
-    const WebSocketConnectionImplPtr &wsConnPtr)
-{
-    findSessionForRequest(req);
-    // Route to controller
-    if (!preRoutingObservers_.empty())
-    {
-        for (auto &observer : preRoutingObservers_)
-        {
-            observer(req);
-        }
-    }
-    if (preRoutingAdvices_.empty())
-    {
-        websockCtrlsRouterPtr_->route(req, std::move(callback), wsConnPtr);
-    }
-    else
-    {
-        auto callbackPtr =
-            std::make_shared<std::function<void(const HttpResponsePtr &)>>(
-                std::move(callback));
-        doAdvicesChain(
-            preRoutingAdvices_,
-            0,
-            req,
-            std::make_shared<std::function<void(const HttpResponsePtr &)>>(
-                [req, callbackPtr, this](const HttpResponsePtr &resp) {
-                    callCallback(req, resp, *callbackPtr);
-                }),
-            [this, callbackPtr, req, wsConnPtr]() {
-                websockCtrlsRouterPtr_->route(req,
-                                              std::move(*callbackPtr),
-                                              wsConnPtr);
-            });
+            sessionManagerPtr_->getSession(sessionId, needSetSessionid));
     }
 }
 
-std::vector<std::tuple<std::string, HttpMethod, std::string>>
-HttpAppFrameworkImpl::getHandlersInfo() const
+std::vector<HttpHandlerInfo> HttpAppFrameworkImpl::getHandlersInfo() const
 {
-    auto ret = httpSimpleCtrlsRouterPtr_->getHandlersInfo();
-    auto v = httpCtrlsRouterPtr_->getHandlersInfo();
-    ret.insert(ret.end(), v.begin(), v.end());
-    v = websockCtrlsRouterPtr_->getHandlersInfo();
-    ret.insert(ret.end(), v.begin(), v.end());
-    return ret;
+    return HttpControllersRouter::instance().getHandlersInfo();
 }
-void HttpAppFrameworkImpl::callCallback(
+
+HttpResponsePtr HttpAppFrameworkImpl::handleSessionForResponse(
     const HttpRequestImplPtr &req,
-    const HttpResponsePtr &resp,
-    const std::function<void(const HttpResponsePtr &)> &callback)
+    const HttpResponsePtr &resp)
 {
     if (useSession_)
     {
         auto &sessionPtr = req->getSession();
-        assert(sessionPtr);
+        if (!sessionPtr)
+        {
+            return resp;
+        }
         if (sessionPtr->needToChangeSessionId())
         {
             sessionManagerPtr_->changeSessionId(sessionPtr);
@@ -711,21 +747,29 @@ void HttpAppFrameworkImpl::callCallback(
                 auto newResp = std::make_shared<HttpResponseImpl>(
                     *static_cast<HttpResponseImpl *>(resp.get()));
                 newResp->setExpiredTime(-1);  // make it temporary
-                auto jsessionid = Cookie("JSESSIONID", sessionPtr->sessionId());
-                jsessionid.setPath("/");
-                newResp->addCookie(std::move(jsessionid));
+                auto sessionid =
+                    Cookie(sessionCookieKey_, sessionPtr->sessionId());
+                sessionid.setPath("/");
+                sessionid.setSameSite(sessionSameSite_);
+                if (sessionMaxAge_ >= 0)
+                    sessionid.setMaxAge(sessionMaxAge_);
+                newResp->addCookie(std::move(sessionid));
                 sessionPtr->hasSet();
-                callback(newResp);
-                return;
+
+                return newResp;
             }
             else
             {
-                auto jsessionid = Cookie("JSESSIONID", sessionPtr->sessionId());
-                jsessionid.setPath("/");
-                resp->addCookie(std::move(jsessionid));
+                auto sessionid =
+                    Cookie(sessionCookieKey_, sessionPtr->sessionId());
+                sessionid.setPath("/");
+                sessionid.setSameSite(sessionSameSite_);
+                if (sessionMaxAge_ >= 0)
+                    sessionid.setMaxAge(sessionMaxAge_);
+                resp->addCookie(std::move(sessionid));
                 sessionPtr->hasSet();
-                callback(resp);
-                return;
+
+                return resp;
             }
         }
         else if (resp->version() != req->version())
@@ -734,13 +778,12 @@ void HttpAppFrameworkImpl::callCallback(
                 *static_cast<HttpResponseImpl *>(resp.get()));
             newResp->setVersion(req->version());
             newResp->setExpiredTime(-1);  // make it temporary
-            callback(newResp);
-            return;
+
+            return newResp;
         }
         else
         {
-            callback(resp);
-            return;
+            return resp;
         }
     }
     else
@@ -751,61 +794,13 @@ void HttpAppFrameworkImpl::callCallback(
                 *static_cast<HttpResponseImpl *>(resp.get()));
             newResp->setVersion(req->version());
             newResp->setExpiredTime(-1);  // make it temporary
-            callback(newResp);
-            return;
+
+            return newResp;
         }
         else
         {
-            callback(resp);
+            return resp;
         }
-    }
-}
-void HttpAppFrameworkImpl::onAsyncRequest(
-    const HttpRequestImplPtr &req,
-    std::function<void(const HttpResponsePtr &)> &&callback)
-{
-    LOG_TRACE << "new request:" << req->peerAddr().toIpPort() << "->"
-              << req->localAddr().toIpPort();
-    LOG_TRACE << "Headers " << req->methodString() << " " << req->path();
-    LOG_TRACE << "http path=" << req->path();
-    if (req->method() == Options && (req->path() == "*" || req->path() == "/*"))
-    {
-        auto resp = HttpResponse::newHttpResponse();
-        resp->setContentTypeCode(ContentType::CT_TEXT_PLAIN);
-        resp->addHeader("ALLOW", "GET,HEAD,POST,PUT,DELETE,OPTIONS,PATCH");
-        resp->setExpiredTime(0);
-        callback(resp);
-        return;
-    }
-    findSessionForRequest(req);
-    // Route to controller
-    if (!preRoutingObservers_.empty())
-    {
-        for (auto &observer : preRoutingObservers_)
-        {
-            observer(req);
-        }
-    }
-    if (preRoutingAdvices_.empty())
-    {
-        httpSimpleCtrlsRouterPtr_->route(req, std::move(callback));
-    }
-    else
-    {
-        auto callbackPtr =
-            std::make_shared<std::function<void(const HttpResponsePtr &)>>(
-                std::move(callback));
-        doAdvicesChain(
-            preRoutingAdvices_,
-            0,
-            req,
-            std::make_shared<std::function<void(const HttpResponsePtr &)>>(
-                [req, callbackPtr, this](const HttpResponsePtr &resp) {
-                    callCallback(req, resp, *callbackPtr);
-                }),
-            [this, callbackPtr, req]() {
-                httpSimpleCtrlsRouterPtr_->route(req, std::move(*callbackPtr));
-            });
     }
 }
 
@@ -817,8 +812,19 @@ trantor::EventLoop *HttpAppFrameworkImpl::getLoop() const
 
 trantor::EventLoop *HttpAppFrameworkImpl::getIOLoop(size_t id) const
 {
-    assert(listenerManagerPtr_);
-    return listenerManagerPtr_->getIOLoop(id);
+    if (!ioLoopThreadPool_)
+    {
+        LOG_WARN << "Please call getIOLoop() after drogon::app().run()";
+        return nullptr;
+    }
+    auto n = ioLoopThreadPool_->size();
+    if (id >= n)
+    {
+        LOG_TRACE << "Loop id (" << id << ") out of range [0-" << n << ").";
+        id %= n;
+        LOG_TRACE << "Rounded to : " << id;
+    }
+    return ioLoopThreadPool_->getLoop(id);
 }
 
 HttpAppFramework &HttpAppFramework::instance()
@@ -826,9 +832,6 @@ HttpAppFramework &HttpAppFramework::instance()
     return HttpAppFrameworkImpl::instance();
 }
 
-HttpAppFramework::~HttpAppFramework()
-{
-}
 void HttpAppFrameworkImpl::forward(
     const HttpRequestPtr &req,
     std::function<void(const HttpResponsePtr &)> &&callback,
@@ -840,6 +843,7 @@ void HttpAppFrameworkImpl::forward(
             hostString,
             timeout);
 }
+
 void HttpAppFrameworkImpl::forward(
     const HttpRequestImplPtr &req,
     std::function<void(const HttpResponsePtr &)> &&callback,
@@ -848,7 +852,7 @@ void HttpAppFrameworkImpl::forward(
 {
     if (hostString.empty())
     {
-        onAsyncRequest(req, std::move(callback));
+        HttpInternalForwardHelper::forward(req, std::move(callback));
     }
     else
     {
@@ -876,8 +880,8 @@ void HttpAppFrameworkImpl::forward(
         req->setPassThrough(true);
         clientPtr->sendRequest(
             req,
-            [callback = std::move(callback)](ReqResult result,
-                                             const HttpResponsePtr &resp) {
+            [callback = std::move(callback), req](ReqResult result,
+                                                  const HttpResponsePtr &resp) {
                 if (result == ReqResult::Ok)
                 {
                     resp->setPassThrough(true);
@@ -885,7 +889,7 @@ void HttpAppFrameworkImpl::forward(
                 }
                 else
                 {
-                    callback(HttpResponse::newNotFoundResponse());
+                    callback(HttpResponse::newNotFoundResponse(req));
                 }
             },
             timeout);
@@ -896,35 +900,134 @@ orm::DbClientPtr HttpAppFrameworkImpl::getDbClient(const std::string &name)
 {
     return dbClientManagerPtr_->getDbClient(name);
 }
+
 orm::DbClientPtr HttpAppFrameworkImpl::getFastDbClient(const std::string &name)
 {
     return dbClientManagerPtr_->getFastDbClient(name);
 }
+
+nosql::RedisClientPtr HttpAppFrameworkImpl::getRedisClient(
+    const std::string &name)
+{
+    return redisClientManagerPtr_->getRedisClient(name);
+}
+
+nosql::RedisClientPtr HttpAppFrameworkImpl::getFastRedisClient(
+    const std::string &name)
+{
+    return redisClientManagerPtr_->getFastRedisClient(name);
+}
+
+// deprecated
 HttpAppFramework &HttpAppFrameworkImpl::createDbClient(
     const std::string &dbType,
     const std::string &host,
-    const unsigned short port,
+    unsigned short port,
     const std::string &databaseName,
     const std::string &userName,
     const std::string &password,
-    const size_t connectionNum,
+    size_t connectionNum,
     const std::string &filename,
     const std::string &name,
-    const bool isFast,
-    const std::string &characterSet)
+    bool isFast,
+    const std::string &characterSet,
+    double timeout,
+    bool autoBatch)
 {
     assert(!running_);
-    dbClientManagerPtr_->createDbClient(dbType,
-                                        host,
+    addDbClient(dbType,
+                host,
+                port,
+                databaseName,
+                userName,
+                password,
+                connectionNum,
+                filename,
+                name,
+                isFast,
+                characterSet,
+                timeout,
+                autoBatch,
+                {});
+    return *this;
+}
+
+void HttpAppFrameworkImpl::addDbClient(
+    const std::string &dbType,
+    const std::string &host,
+    unsigned short port,
+    const std::string &databaseName,
+    const std::string &userName,
+    const std::string &password,
+    size_t connectionNum,
+    const std::string &filename,
+    const std::string &name,
+    bool isFast,
+    const std::string &characterSet,
+    double timeout,
+    bool autoBatch,
+    std::unordered_map<std::string, std::string> options)
+{
+    if (dbType == "postgresql" || dbType == "postgres")
+    {
+        addDbClient(orm::PostgresConfig{host,
                                         port,
                                         databaseName,
                                         userName,
                                         password,
                                         connectionNum,
-                                        filename,
                                         name,
                                         isFast,
-                                        characterSet);
+                                        characterSet,
+                                        timeout,
+                                        autoBatch,
+                                        std::move(options)});
+    }
+    else if (dbType == "mysql")
+    {
+        addDbClient(orm::MysqlConfig{host,
+                                     port,
+                                     databaseName,
+                                     userName,
+                                     password,
+                                     connectionNum,
+                                     name,
+                                     isFast,
+                                     characterSet,
+                                     timeout});
+    }
+    else if (dbType == "sqlite3")
+    {
+        addDbClient(orm::Sqlite3Config{connectionNum, filename, name, timeout});
+    }
+    else
+    {
+        LOG_ERROR << "Unsupported database type: " << dbType
+                  << ", should be one of (postgresql, mysql, sqlite3)";
+    }
+}
+
+HttpAppFramework &HttpAppFrameworkImpl::addDbClient(const orm::DbConfig &config)
+{
+    assert(!running_);
+    dbClientManagerPtr_->addDbClient(config);
+    return *this;
+}
+
+HttpAppFramework &HttpAppFrameworkImpl::createRedisClient(
+    const std::string &ip,
+    unsigned short port,
+    const std::string &name,
+    const std::string &password,
+    size_t connectionNum,
+    bool isFast,
+    double timeout,
+    unsigned int db,
+    const std::string &username)
+{
+    assert(!running_);
+    redisClientManagerPtr_->createRedisClient(
+        name, ip, port, username, password, connectionNum, isFast, timeout, db);
     return *this;
 }
 
@@ -933,8 +1036,21 @@ void HttpAppFrameworkImpl::quit()
     if (getLoop()->isRunning())
     {
         getLoop()->queueInLoop([this]() {
+            // Release members in the reverse order of initialization
             listenerManagerPtr_->stopListening();
+            listenerManagerPtr_.reset();
+            StaticFileRouter::instance().reset();
+            HttpControllersRouter::instance().reset();
+            pluginsManagerPtr_.reset();
+            redisClientManagerPtr_.reset();
+            dbClientManagerPtr_.reset();
+            running_ = false;
             getLoop()->quit();
+            for (trantor::EventLoop *loop : ioLoopThreadPool_->getLoops())
+            {
+                loop->quit();
+            }
+            ioLoopThreadPool_->wait();
         });
     }
 }
@@ -952,10 +1068,11 @@ const HttpResponsePtr &HttpAppFrameworkImpl::getCustom404Page()
         static IOThreadStorage<HttpResponsePtr> thread404Pages;
         static std::once_flag once;
         std::call_once(once, [this] {
-            thread404Pages.init([this](HttpResponsePtr &resp, size_t index) {
-                resp = std::make_shared<HttpResponseImpl>(
-                    *static_cast<HttpResponseImpl *>(custom404_.get()));
-            });
+            thread404Pages.init(
+                [this](HttpResponsePtr &resp, size_t /*index*/) {
+                    resp = std::make_shared<HttpResponseImpl>(
+                        *static_cast<HttpResponseImpl *>(custom404_.get()));
+                });
         });
         return thread404Pages.getThreadData();
     }
@@ -968,7 +1085,7 @@ const HttpResponsePtr &HttpAppFrameworkImpl::getCustom404Page()
 HttpAppFramework &HttpAppFrameworkImpl::setStaticFileHeaders(
     const std::vector<std::pair<std::string, std::string>> &headers)
 {
-    staticFileRouterPtr_->setStaticFileHeaders(headers);
+    StaticFileRouter::instance().setStaticFileHeaders(headers);
     return *this;
 }
 
@@ -979,15 +1096,15 @@ HttpAppFramework &HttpAppFrameworkImpl::addALocation(
     bool isCaseSensitive,
     bool allowAll,
     bool isRecursive,
-    const std::vector<std::string> &filters)
+    const std::vector<std::string> &middlewareNames)
 {
-    staticFileRouterPtr_->addALocation(uriPrefix,
-                                       defaultContentType,
-                                       alias,
-                                       isCaseSensitive,
-                                       allowAll,
-                                       isRecursive,
-                                       filters);
+    StaticFileRouter::instance().addALocation(uriPrefix,
+                                              defaultContentType,
+                                              alias,
+                                              isCaseSensitive,
+                                              allowAll,
+                                              isRecursive,
+                                              middlewareNames);
     return *this;
 }
 
@@ -997,15 +1114,17 @@ bool HttpAppFrameworkImpl::areAllDbClientsAvailable() const noexcept
 }
 
 HttpAppFramework &HttpAppFrameworkImpl::setCustomErrorHandler(
-    std::function<HttpResponsePtr(HttpStatusCode)> &&resp_generator)
+    std::function<HttpResponsePtr(HttpStatusCode, const HttpRequestPtr &req)>
+        &&resp_generator)
 {
     customErrorHandler_ = std::move(resp_generator);
     usingCustomErrorHandler_ = true;
     return *this;
 }
 
-const std::function<HttpResponsePtr(HttpStatusCode)>
-    &HttpAppFrameworkImpl::getCustomErrorHandler() const
+const std::function<HttpResponsePtr(HttpStatusCode,
+                                    const HttpRequestPtr &req)> &
+HttpAppFrameworkImpl::getCustomErrorHandler() const
 {
     return customErrorHandler_;
 }
@@ -1013,4 +1132,238 @@ const std::function<HttpResponsePtr(HttpStatusCode)>
 std::vector<trantor::InetAddress> HttpAppFrameworkImpl::getListeners() const
 {
     return listenerManagerPtr_->getListeners();
+}
+
+HttpAppFramework &HttpAppFrameworkImpl::setDefaultHandler(
+    DefaultHandler handler)
+{
+    StaticFileRouter::instance().setDefaultHandler(std::move(handler));
+    return *this;
+}
+
+HttpAppFramework &HttpAppFrameworkImpl::setupFileLogger()
+{
+#ifdef DROGON_SPDLOG_SUPPORT
+    if (logWithSpdlog_)
+    {
+        // Do nothing if already initialized...
+        if (!trantor::Logger::getSpdLogger())
+        {
+            trantor::Logger::enableSpdLog();
+            // Get the new logger & replace its sinks with the ones of the
+            // config
+            auto logger = trantor::Logger::getSpdLogger();
+            std::vector<spdlog::sink_ptr> sinks;
+            if (!logPath_.empty())
+            {
+                // 1. check existence of folder or try to create it
+                auto fsLogPath =
+                    std::filesystem::path(utils::toNativePath(logPath_));
+                std::error_code fsErr;
+                if (!std::filesystem::create_directories(fsLogPath, fsErr) &&
+                    fsErr)
+                {
+                    LOG_ERROR << "could not create log file path";
+                    abort();
+                }
+                // 2. check if we have rights to create files in the folder
+                if (os_access(fsLogPath.native().c_str(), W_OK) != 0)
+                {
+                    LOG_ERROR << "cannot create files in log folder";
+                    abort();
+                }
+                std::filesystem::path baseName(logfileBaseName_);
+                if (baseName.empty())
+                    baseName = "drogon.log";
+                else
+                    baseName.replace_extension(".log");
+                auto sizeLimit = logfileSize_;
+                if (sizeLimit == 0)  // 0 is not allowed by this sink
+                    sizeLimit = std::numeric_limits<std::size_t>::max();
+                sinks.push_back(
+                    std::make_shared<spdlog::sinks::rotating_file_sink_mt>(
+                        (fsLogPath / baseName).string(),
+                        sizeLimit,
+                        // spdlog limitation
+                        std::min(logfileMaxNum_, std::size_t(20000)),
+                        false));
+            }
+            else
+                sinks.push_back(
+                    std::make_shared<spdlog::sinks::stderr_color_sink_mt>());
+#if defined(_WIN32) && defined(_DEBUG)
+            // On Windows with debug, it may be interesting to have the logs
+            // directly in the Visual Studio / WinDbg console
+            sinks.push_back(std::make_shared<spdlog::sinks::msvc_sink_mt>());
+#endif
+            // Note: the new sinks won't use the format pattern set on the
+            // logger, and there is currently not way to retrieve it.
+            // So, set the same pattern as the one set on the logger in
+            // trantor::Logger::getDefaultSpdLogger()
+            for (auto &sink : sinks)
+                sink->set_pattern("%Y%m%d %T.%f %6t %^%=8l%$ [%!] %v - %s:%#");
+            logger->sinks() = sinks;
+        }
+        return *this;
+    }
+#endif  // DROGON_SPDLOG_SUPPORT
+    if (!logPath_.empty() && !asyncFileLoggerPtr_)
+    {
+        // std::filesystem does not provide a method to check access
+        // permissions, so keep existing code
+        if (os_access(utils::toNativePath(logPath_).c_str(), R_OK | W_OK) != 0)
+        {
+            LOG_ERROR << "log file path not exist";
+            abort();
+        }
+        else
+        {
+            std::string baseName = logfileBaseName_;
+            if (baseName.empty())
+            {
+                baseName = "drogon";
+            }
+            asyncFileLoggerPtr_ = std::make_shared<trantor::AsyncFileLogger>();
+            asyncFileLoggerPtr_->setFileName(baseName, ".log", logPath_);
+            asyncFileLoggerPtr_->startLogging();
+            asyncFileLoggerPtr_->setFileSizeLimit(logfileSize_);
+            asyncFileLoggerPtr_->setMaxFiles(logfileMaxNum_);
+            trantor::Logger::setOutputFunction(
+                [loggerPtr = asyncFileLoggerPtr_](const char *msg,
+                                                  const uint64_t len) {
+                    loggerPtr->output(msg, len);
+                },
+                [loggerPtr = asyncFileLoggerPtr_]() { loggerPtr->flush(); });
+        }
+    }
+    return *this;
+}
+
+HttpAppFramework &HttpAppFrameworkImpl::registerCustomExtensionMime(
+    const std::string &ext,
+    const std::string &mime)
+{
+    drogon::registerCustomExtensionMime(ext, mime);
+    return *this;
+}
+
+int64_t HttpAppFrameworkImpl::getConnectionCount() const
+{
+    return HttpConnectionLimit::instance().getConnectionNum();
+}
+
+HttpAppFramework &HttpAppFrameworkImpl::enableRequestStream(bool enable)
+{
+    enableRequestStream_ = enable;
+    return *this;
+}
+
+bool HttpAppFrameworkImpl::isRequestStreamEnabled() const
+{
+    return enableRequestStream_;
+}
+
+// AOP registration methods
+
+HttpAppFramework &HttpAppFrameworkImpl::registerNewConnectionAdvice(
+    const std::function<bool(const trantor::InetAddress &,
+                             const trantor::InetAddress &)> &advice)
+{
+    AopAdvice::instance().registerNewConnectionAdvice(advice);
+    return *this;
+}
+
+HttpAppFramework &HttpAppFrameworkImpl::registerHttpResponseCreationAdvice(
+    const std::function<void(const HttpResponsePtr &)> &advice)
+{
+    // Is this callback really an AOP?
+    // Maybe we should store them in HttpResponseImpl class as static member
+    AopAdvice::instance().registerHttpResponseCreationAdvice(advice);
+    return *this;
+}
+
+HttpAppFramework &HttpAppFrameworkImpl::registerSyncAdvice(
+    const std::function<HttpResponsePtr(const HttpRequestPtr &)> &advice)
+
+{
+    AopAdvice::instance().registerSyncAdvice(advice);
+    return *this;
+}
+
+HttpAppFramework &HttpAppFrameworkImpl::registerPreRoutingAdvice(
+    const std::function<void(const HttpRequestPtr &)> &advice)
+{
+    AopAdvice::instance().registerPreRoutingObserver(advice);
+    return *this;
+}
+
+HttpAppFramework &HttpAppFrameworkImpl::registerPreRoutingAdvice(
+    const std::function<void(const HttpRequestPtr &,
+                             AdviceCallback &&,
+                             AdviceChainCallback &&)> &advice)
+{
+    AopAdvice::instance().registerPreRoutingAdvice(advice);
+    return *this;
+}
+
+HttpAppFramework &HttpAppFrameworkImpl::registerPostRoutingAdvice(
+    const std::function<void(const HttpRequestPtr &)> &advice)
+{
+    AopAdvice::instance().registerPostRoutingObserver(advice);
+    return *this;
+}
+
+HttpAppFramework &HttpAppFrameworkImpl::registerPostRoutingAdvice(
+    const std::function<void(const HttpRequestPtr &,
+                             AdviceCallback &&,
+                             AdviceChainCallback &&)> &advice)
+{
+    AopAdvice::instance().registerPostRoutingAdvice(advice);
+    return *this;
+}
+
+HttpAppFramework &HttpAppFrameworkImpl::registerPreHandlingAdvice(
+    const std::function<void(const HttpRequestPtr &)> &advice)
+{
+    AopAdvice::instance().registerPreHandlingObserver(advice);
+    return *this;
+}
+
+HttpAppFramework &HttpAppFrameworkImpl::registerPreHandlingAdvice(
+    const std::function<void(const HttpRequestPtr &,
+                             AdviceCallback &&,
+                             AdviceChainCallback &&)> &advice)
+{
+    AopAdvice::instance().registerPreHandlingAdvice(advice);
+    return *this;
+}
+
+HttpAppFramework &HttpAppFrameworkImpl::registerPostHandlingAdvice(
+    const std::function<void(const HttpRequestPtr &, const HttpResponsePtr &)>
+        &advice)
+{
+    AopAdvice::instance().registerPostHandlingAdvice(advice);
+    return *this;
+}
+
+HttpAppFramework &HttpAppFrameworkImpl::registerPreSendingAdvice(
+    const std::function<void(const HttpRequestPtr &, const HttpResponsePtr &)>
+        &advice)
+{
+    AopAdvice::instance().registerPreSendingAdvice(advice);
+    return *this;
+}
+
+HttpAppFramework &HttpAppFrameworkImpl::setBeforeListenSockOptCallback(
+    std::function<void(int)> cb)
+{
+    listenerManagerPtr_->setBeforeListenSockOptCallback(std::move(cb));
+    return *this;
+}
+
+HttpAppFramework &HttpAppFrameworkImpl::setAfterAcceptSockOptCallback(
+    std::function<void(int)> cb)
+{
+    listenerManagerPtr_->setAfterAcceptSockOptCallback(std::move(cb));
+    return *this;
 }

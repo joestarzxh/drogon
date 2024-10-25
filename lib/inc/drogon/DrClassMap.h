@@ -1,7 +1,7 @@
 /**
  *
- *  DrClassMap.h
- *  An Tao
+ *  @file DrClassMap.h
+ *  @author An Tao
  *
  *  Copyright 2018, An Tao.  All rights reserved.
  *  https://github.com/an-tao/drogon
@@ -14,6 +14,7 @@
 
 #pragma once
 
+#include <drogon/exports.h>
 #include <trantor/utils/Logger.h>
 #include <functional>
 #include <memory>
@@ -32,11 +33,12 @@ namespace drogon
 {
 class DrObjectBase;
 using DrAllocFunc = std::function<DrObjectBase *()>;
+using DrSharedAllocFunc = std::function<std::shared_ptr<DrObjectBase>()>;
 
 /**
  * @brief A map class which can create DrObjects from names.
  */
-class DrClassMap
+class DROGON_EXPORT DrClassMap
 {
   public:
     /**
@@ -46,7 +48,8 @@ class DrClassMap
      * @param func The function which can create a new instance of the class.
      */
     static void registerClass(const std::string &className,
-                              const DrAllocFunc &func);
+                              const DrAllocFunc &func,
+                              const DrSharedAllocFunc &sharedFunc = nullptr);
 
     /**
      * @brief Create a new instance of the class named by className
@@ -55,6 +58,12 @@ class DrClassMap
      * @return DrObjectBase* The pointer to the newly created instance.
      */
     static DrObjectBase *newObject(const std::string &className);
+
+    /**
+     * @brief Get the shared_ptr instance of the class named by className
+     */
+    static std::shared_ptr<DrObjectBase> newSharedObject(
+        const std::string &className);
 
     /**
      * @brief Get the singleton object of the class named by className
@@ -128,7 +137,8 @@ class DrClassMap
     }
 
   protected:
-    static std::unordered_map<std::string, DrAllocFunc> &getMap();
+    static std::unordered_map<std::string,
+                              std::pair<DrAllocFunc, DrSharedAllocFunc>> &
+    getMap();
 };
-
 }  // namespace drogon

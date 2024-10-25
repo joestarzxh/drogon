@@ -1,6 +1,6 @@
 /**
- *  Plugin.h
- *  An Tao
+ *  @file Plugin.h
+ *  @author An Tao
  *
  *  Copyright 2018, An Tao.  All rights reserved.
  *  https://github.com/an-tao/drogon
@@ -32,7 +32,8 @@ enum class PluginStatus
  * @brief The abstract base class for plugins.
  *
  */
-class PluginBase : public virtual DrObjectBase, public trantor::NonCopyable
+class DROGON_EXPORT PluginBase : public virtual DrObjectBase,
+                                 public trantor::NonCopyable
 {
   public:
     /// This method must be called by drogon.
@@ -81,18 +82,22 @@ class PluginBase : public virtual DrObjectBase, public trantor::NonCopyable
   private:
     PluginStatus status_{PluginStatus::None};
     friend class PluginsManager;
+
     void setConfig(const Json::Value &config)
     {
         config_ = config;
     }
+
     void addDependency(PluginBase *dp)
     {
         dependencies_.push_back(dp);
     }
+
     void setInitializedCallback(const std::function<void(PluginBase *)> &cb)
     {
         initializedCallback_ = cb;
     }
+
     Json::Value config_;
     std::vector<PluginBase *> dependencies_;
     std::function<void(PluginBase *)> initializedCallback_;
@@ -101,17 +106,18 @@ class PluginBase : public virtual DrObjectBase, public trantor::NonCopyable
 template <typename T>
 struct IsPlugin
 {
-    using TYPE =
-        typename std::remove_cv<typename std::remove_reference<T>::type>::type;
+    using TYPE = std::remove_cv_t<typename std::remove_reference_t<T>>;
 
     static int test(void *)
     {
         return 0;
     }
+
     static char test(PluginBase *)
     {
         return 0;
     }
+
     static constexpr bool value =
         (sizeof(test((TYPE *)nullptr)) == sizeof(char));
 };

@@ -2,17 +2,17 @@
  */
 {
     /*
-    //ssl:The global ssl files setting
+    //ssl: The global ssl files setting
     "ssl": {
-        "cert": "../../trantor/trantor/tests/server.pem",
-        "key": "../../trantor/trantor/tests/server.pem"
+        "cert": "../../trantor/trantor/tests/server.crt",
+        "key": "../../trantor/trantor/tests/server.key"
     },*/
     "listeners": [{
         //address: Ip address,0.0.0.0 by default
         "address": "0.0.0.0",
         //port: Port number
         "port": 8088,
-        //https: If true, use https for security,false by default
+        //https: If true, use https for security, false by default
         "https": false
     }],
     "app": {
@@ -22,7 +22,11 @@
         //enable_session: False by default
         "enable_session": false,
         "session_timeout": 0,
-        //document_root: Root path of HTTP document, defaut path is ./
+        //session_cookie_key: The cookie key of the session, "JSESSIONID" by default
+        "session_cookie_key": "JSESSIONID",
+        //session_max_age: The max age of the session cookie, -1 by default
+        "session_max_age": -1,
+        //document_root: Root path of HTTP document, default path is ./
         "document_root": "./",
         //home_page: Set the HTML file of the home page, the default value is "index.html"
         //If there isn't any handler registered to the path "/", the home page file in the "document_root" is send to clients as a response
@@ -40,7 +44,7 @@
         //it is relative path of document_root path
         "upload_path": "uploads",
         /* file_types:
-         * HTTP download file types,The file types supported by drogon
+         * HTTP download file types, the file types supported by drogon
          * by default are "html", "js", "css", "xml", "xsl", "txt", "svg",
          * "ttf", "otf", "woff2", "woff" , "eot", "png", "jpg", "jpeg",
          * "gif", "bmp", "ico", "icns", etc. */
@@ -58,9 +62,9 @@
             "cur",
             "xml"
         ],
-        //max_connections: maximum connections number,100000 by default
+        //max_connections: maximum connections number, 100000 by default
         "max_connections": 100000,
-        //max_connections_per_ip: maximum connections number per clinet,0 by default which means no limit
+        //max_connections_per_ip: maximum connections number per client,0 by default which means no limit
         "max_connections_per_ip": 0,
         //Load_dynamic_views: False by default, when set to true, drogon
         //compiles and loads dynamically "CSP View Files" in directories defined
@@ -87,6 +91,8 @@
         },
         //run_as_daemon: False by default
         "run_as_daemon": false,
+        //handle_sig_term: True by default
+        "handle_sig_term": true,
         //relaunch_on_error: False by default, if true, the program will be restart by the parent after exiting;
         "relaunch_on_error": false,
         //use_sendfile: True by default, if true, the program 

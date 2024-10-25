@@ -1,7 +1,7 @@
 /**
  *
- *  HttpResponseParser.cc
- *  An Tao
+ *  @file HttpResponseParser.cc
+ *  @author An Tao
  *
  *  Copyright 2018, An Tao.  All rights reserved.
  *  https://github.com/an-tao/drogon
@@ -14,9 +14,10 @@
 
 #include "HttpResponseParser.h"
 #include "HttpResponseImpl.h"
-#include <iostream>
 #include <trantor/utils/Logger.h>
 #include <trantor/utils/MsgBuffer.h>
+#include <algorithm>
+
 using namespace trantor;
 using namespace drogon;
 
@@ -29,9 +30,10 @@ void HttpResponseParser::reset()
     currentChunkLength_ = 0;
 }
 
-HttpResponseParser::HttpResponseParser()
+HttpResponseParser::HttpResponseParser(const trantor::TcpConnectionPtr &connPtr)
     : status_(HttpResponseParseStatus::kExpectResponseLine),
-      responsePtr_(new HttpResponseImpl)
+      responsePtr_(new HttpResponseImpl),
+      conn_(connPtr)
 {
 }
 
@@ -66,6 +68,16 @@ bool HttpResponseParser::processResponseLine(const char *begin, const char *end)
         auto code = atoi(status_code.c_str());
         responsePtr_->setStatusCode(HttpStatusCode(code));
 
+        return true;
+    }
+    return false;
+}
+
+bool HttpResponseParser::parseResponseOnClose()
+{
+    if (status_ == HttpResponseParseStatus::kExpectClose)
+    {
+        status_ = HttpResponseParseStatus::kGotAll;
         return true;
     }
     return false;
@@ -117,7 +129,7 @@ bool HttpResponseParser::parseResponse(MsgBuffer *buf)
                     // LOG_INFO << "content len=" << len;
                     if (!len.empty())
                     {
-                        leftBodyLength_ = atoi(len.c_str());
+                        leftBodyLength_ = static_cast<size_t>(std::stoull(len));
                         status_ = HttpResponseParseStatus::kExpectBody;
                     }
                     else
@@ -133,9 +145,18 @@ bool HttpResponseParser::parseResponse(MsgBuffer *buf)
                         {
                             if (responsePtr_->statusCode() == k204NoContent ||
                                 (responsePtr_->statusCode() ==
-                                     k101SwitchingProtocols &&
-                                 responsePtr_->getHeaderBy("upgrade") ==
-                                     "websocket"))
+                                         k101SwitchingProtocols &&
+                                     [this]() -> bool {
+                                    std::string upgradeValue =
+                                        responsePtr_->getHeaderBy("upgrade");
+                                    std::transform(upgradeValue.begin(),
+                                                   upgradeValue.end(),
+                                                   upgradeValue.begin(),
+                                                   [](unsigned char c) {
+                                                       return tolower(c);
+                                                   });
+                                    return upgradeValue == "websocket";
+                                }()))
                             {
                                 // The Websocket response may not have a
                                 // content-length header.
@@ -145,6 +166,8 @@ bool HttpResponseParser::parseResponse(MsgBuffer *buf)
                             else
                             {
                                 status_ = HttpResponseParseStatus::kExpectClose;
+                                auto connPtr = conn_.lock();
+                                connPtr->shutdown();
                                 hasMore = true;
                             }
                         }

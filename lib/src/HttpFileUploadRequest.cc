@@ -26,7 +26,6 @@ HttpFileUploadRequest::HttpFileUploadRequest(
 {
     setMethod(drogon::Post);
     setVersion(drogon::Version::kHttp11);
-    setContentType("Content-Type: multipart/form-data; boundary=" + boundary_ +
-                   "\r\n");
+    setContentType("multipart/form-data; boundary=" + boundary_);
     contentType_ = CT_MULTIPART_FORM_DATA;
 }

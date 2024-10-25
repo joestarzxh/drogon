@@ -1,7 +1,7 @@
 /**
  *
- *  WebSocketConnectionImpl.cc
- *  An Tao
+ *  @file WebSocketConnectionImpl.cc
+ *  @author An Tao
  *
  *  Copyright 2018, An Tao.  All rights reserved.
  *  https://github.com/an-tao/drogon
@@ -14,17 +14,26 @@
 
 #include "WebSocketConnectionImpl.h"
 #include "HttpAppFrameworkImpl.h"
+#include <json/value.h>
+#include <json/writer.h>
 #include <thread>
 
 using namespace drogon;
+
 WebSocketConnectionImpl::WebSocketConnectionImpl(
     const trantor::TcpConnectionPtr &conn,
     bool isServer)
     : tcpConnectionPtr_(conn),
       localAddr_(conn->localAddr()),
       peerAddr_(conn->peerAddr()),
-      isServer_(isServer)
+      isServer_(isServer),
+      usingMask_(false)
 {
+}
+
+WebSocketConnectionImpl::~WebSocketConnectionImpl()
+{
+    shutdown();
 }
 
 void WebSocketConnectionImpl::send(const char *msg,
@@ -81,7 +90,7 @@ void WebSocketConnectionImpl::sendWsData(const char *msg,
     {
         bytesFormatted[1] = 126;
         bytesFormatted[2] = ((len >> 8) & 255);
-        bytesFormatted[3] = ((len)&255);
+        bytesFormatted[3] = ((len) & 255);
         LOG_TRACE << "bytes[2]=" << (size_t)bytesFormatted[2];
         LOG_TRACE << "bytes[3]=" << (size_t)bytesFormatted[3];
         indexStartRawData = 4;
@@ -96,22 +105,48 @@ void WebSocketConnectionImpl::sendWsData(const char *msg,
         bytesFormatted[6] = ((len >> 24) & 255);
         bytesFormatted[7] = ((len >> 16) & 255);
         bytesFormatted[8] = ((len >> 8) & 255);
-        bytesFormatted[9] = ((len)&255);
+        bytesFormatted[9] = ((len) & 255);
 
         indexStartRawData = 10;
     }
     if (!isServer_)
     {
-        // Add masking key;
-        static std::once_flag once;
-        std::call_once(once, []() {
-            std::srand(static_cast<unsigned int>(time(nullptr)));
-        });
-        int random = std::rand();
+        int random;
+        // Use the cached randomness if no one else is also using it. Otherwise
+        // generate one from scratch.
+        if (!usingMask_.exchange(true, std::memory_order_acq_rel))
+        {
+            if (masks_.empty())
+            {
+                masks_.resize(16);
+                bool status =
+                    utils::secureRandomBytes(masks_.data(),
+                                             masks_.size() * sizeof(uint32_t));
+                if (status == false)
+                {
+                    LOG_ERROR << "Failed to generate random numbers for "
+                                 "WebSocket mask";
+                    abort();
+                }
+            }
+            random = masks_.back();
+            masks_.pop_back();
+            usingMask_.store(false, std::memory_order_release);
+        }
+        else
+        {
+            bool status = utils::secureRandomBytes(&random, sizeof(random));
+            if (status == false)
+            {
+                LOG_ERROR
+                    << "Failed to generate random numbers for WebSocket mask";
+                abort();
+            }
+        }
 
         bytesFormatted[1] = (bytesFormatted[1] | 0x80);
         bytesFormatted.resize(indexStartRawData + 4 + len);
-        *((int *)&bytesFormatted[indexStartRawData]) = random;
+        memcpy(&bytesFormatted[indexStartRawData], &random, sizeof(random));
         for (size_t i = 0; i < len; ++i)
         {
             bytesFormatted[indexStartRawData + 4 + i] =
@@ -125,15 +160,41 @@ void WebSocketConnectionImpl::sendWsData(const char *msg,
     }
     tcpConnectionPtr_->send(std::move(bytesFormatted));
 }
-void WebSocketConnectionImpl::send(const std::string &msg,
+
+void WebSocketConnectionImpl::send(const std::string_view msg,
                                    const WebSocketMessageType type)
 {
     send(msg.data(), msg.length(), type);
 }
+
+void WebSocketConnectionImpl::sendJson(const Json::Value &json,
+                                       const WebSocketMessageType type)
+{
+    static std::once_flag once;
+    static Json::StreamWriterBuilder builder;
+    std::call_once(once, []() {
+        builder["commentStyle"] = "None";
+        builder["indentation"] = "";
+        if (!app().isUnicodeEscapingUsedInJson())
+        {
+            builder["emitUTF8"] = true;
+        }
+        auto &precision = app().getFloatPrecisionInJson();
+        if (precision.first != 0)
+        {
+            builder["precision"] = precision.first;
+            builder["precisionType"] = precision.second;
+        }
+    });
+    auto msg = writeString(builder, json);
+    send(msg.data(), msg.length(), type);
+}
+
 const trantor::InetAddress &WebSocketConnectionImpl::localAddr() const
 {
     return localAddr_;
 }
+
 const trantor::InetAddress &WebSocketConnectionImpl::peerAddr() const
 {
     return peerAddr_;
@@ -143,15 +204,19 @@ bool WebSocketConnectionImpl::connected() const
 {
     return tcpConnectionPtr_->connected();
 }
+
 bool WebSocketConnectionImpl::disconnected() const
 {
     return tcpConnectionPtr_->disconnected();
 }
+
 void WebSocketConnectionImpl::WebSocketConnectionImpl::shutdown(
     const CloseCode code,
     const std::string &reason)
 {
     tcpConnectionPtr_->getLoop()->invalidateTimer(pingTimerId_);
+    if (!tcpConnectionPtr_->connected())
+        return;
     std::string message;
     message.resize(reason.length() + 2);
     auto c = htons(static_cast<unsigned short>(code));
@@ -161,6 +226,7 @@ void WebSocketConnectionImpl::WebSocketConnectionImpl::shutdown(
     send(message, WebSocketMessageType::Close);
     tcpConnectionPtr_->shutdown();
 }
+
 void WebSocketConnectionImpl::WebSocketConnectionImpl::forceClose()
 {
     tcpConnectionPtr_->forceClose();
@@ -168,17 +234,34 @@ void WebSocketConnectionImpl::WebSocketConnectionImpl::forceClose()
 
 void WebSocketConnectionImpl::setPingMessage(
     const std::string &message,
-    const std::chrono::duration<long double> &interval)
+    const std::chrono::duration<double> &interval)
 {
-    std::weak_ptr<WebSocketConnectionImpl> weakPtr = shared_from_this();
-    pingTimerId_ = tcpConnectionPtr_->getLoop()->runEvery(
-        interval.count(), [weakPtr, message]() {
-            auto thisPtr = weakPtr.lock();
-            if (thisPtr)
-            {
-                thisPtr->send(message, WebSocketMessageType::Ping);
-            }
-        });
+    auto loop = tcpConnectionPtr_->getLoop();
+    if (loop->isInLoopThread())
+    {
+        setPingMessageInLoop(std::string{message}, interval);
+    }
+    else
+    {
+        loop->queueInLoop(
+            [msg = message, interval, thisPtr = shared_from_this()]() mutable {
+                thisPtr->setPingMessageInLoop(std::move(msg), interval);
+            });
+    }
+}
+
+void WebSocketConnectionImpl::disablePing()
+{
+    auto loop = tcpConnectionPtr_->getLoop();
+    if (loop->isInLoopThread())
+    {
+        disablePingInLoop();
+    }
+    else
+    {
+        loop->queueInLoop(
+            [thisPtr = shared_from_this()]() { thisPtr->disablePingInLoop(); });
+    }
 }
 
 bool WebSocketMessageParser::parse(trantor::MsgBuffer *buffer)
@@ -323,6 +406,7 @@ void WebSocketConnectionImpl::onNewMessage(
     const trantor::TcpConnectionPtr &connPtr,
     trantor::MsgBuffer *buffer)
 {
+    auto self = shared_from_this();
     while (buffer->readableBytes() > 0)
     {
         auto success = parser_.parse(buffer);
@@ -346,7 +430,9 @@ void WebSocketConnectionImpl::onNewMessage(
                 {
                     return;
                 }
-                messageCallback_(std::move(message), shared_from_this(), type);
+                // LOG_TRACE << "new message received: " << message
+                //           << "\n(type=" << (int)type << ")";
+                messageCallback_(std::move(message), self, type);
             }
             else
             {
@@ -361,4 +447,28 @@ void WebSocketConnectionImpl::onNewMessage(
         }
     }
     return;
+}
+
+void WebSocketConnectionImpl::disablePingInLoop()
+{
+    if (pingTimerId_ != trantor::InvalidTimerId)
+    {
+        tcpConnectionPtr_->getLoop()->invalidateTimer(pingTimerId_);
+    }
+}
+
+void WebSocketConnectionImpl::setPingMessageInLoop(
+    std::string &&message,
+    const std::chrono::duration<double> &interval)
+{
+    std::weak_ptr<WebSocketConnectionImpl> weakPtr = shared_from_this();
+    disablePingInLoop();
+    pingTimerId_ = tcpConnectionPtr_->getLoop()->runEvery(
+        interval.count(), [weakPtr, message = std::move(message)]() {
+            auto thisPtr = weakPtr.lock();
+            if (thisPtr)
+            {
+                thisPtr->send(message, WebSocketMessageType::Ping);
+            }
+        });
 }

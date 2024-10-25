@@ -18,50 +18,82 @@
 using namespace drogon::orm;
 using namespace drogon;
 
-internal::SqlBinder DbClient::operator<<(const std::string &sql)
+DbClient::~DbClient() = default;
+
+orm::internal::SqlBinder DbClient::operator<<(const std::string &sql)
 {
-    return internal::SqlBinder(sql, *this, type_);
+    return orm::internal::SqlBinder(sql, *this, type_);
 }
 
-internal::SqlBinder DbClient::operator<<(std::string &&sql)
+orm::internal::SqlBinder DbClient::operator<<(std::string &&sql)
 {
-    return internal::SqlBinder(std::move(sql), *this, type_);
+    return orm::internal::SqlBinder(std::move(sql), *this, type_);
 }
 
 std::shared_ptr<DbClient> DbClient::newPgClient(const std::string &connInfo,
-                                                const size_t connNum)
+                                                size_t connNum,
+                                                bool autoBatch)
 {
 #if USE_POSTGRESQL
-    return std::make_shared<DbClientImpl>(connInfo,
-                                          connNum,
-                                          ClientType::PostgreSQL);
+    auto client = std::make_shared<DbClientImpl>(connInfo,
+                                                 connNum,
+#if LIBPQ_SUPPORTS_BATCH_MODE
+                                                 ClientType::PostgreSQL,
+                                                 autoBatch);
+#else
+                                                 ClientType::PostgreSQL);
+#endif
+    client->init();
+    return client;
 #else
     LOG_FATAL << "PostgreSQL is not supported!";
     exit(1);
+    (void)(connInfo);
+    (void)(connNum);
 #endif
 }
 
 std::shared_ptr<DbClient> DbClient::newMysqlClient(const std::string &connInfo,
-                                                   const size_t connNum)
+                                                   size_t connNum)
 {
 #if USE_MYSQL
-    return std::make_shared<DbClientImpl>(connInfo, connNum, ClientType::Mysql);
+    auto client = std::make_shared<DbClientImpl>(connInfo,
+                                                 connNum,
+#if LIBPQ_SUPPORTS_BATCH_MODE
+                                                 ClientType::Mysql,
+                                                 false);
+#else
+                                                 ClientType::Mysql);
+#endif
+    client->init();
+    return client;
 #else
     LOG_FATAL << "Mysql is not supported!";
     exit(1);
+    (void)(connInfo);
+    (void)(connNum);
 #endif
 }
 
 std::shared_ptr<DbClient> DbClient::newSqlite3Client(
     const std::string &connInfo,
-    const size_t connNum)
+    size_t connNum)
 {
 #if USE_SQLITE3
-    return std::make_shared<DbClientImpl>(connInfo,
-                                          connNum,
-                                          ClientType::Sqlite3);
+    auto client = std::make_shared<DbClientImpl>(connInfo,
+                                                 connNum,
+#if LIBPQ_SUPPORTS_BATCH_MODE
+                                                 ClientType::Sqlite3,
+                                                 false);
+#else
+                                                 ClientType::Sqlite3);
+#endif
+    client->init();
+    return client;
 #else
     LOG_FATAL << "Sqlite3 is not supported!";
     exit(1);
+    (void)(connInfo);
+    (void)(connNum);
 #endif
 }

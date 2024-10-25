@@ -1,7 +1,7 @@
 /**
  *
- *  HttpFileImpl.cc
- *  An Tao
+ *  @file HttpFileImpl.cc
+ *  @author An Tao
  *
  *  Copyright 2018, An Tao.  All rights reserved.
  *  https://github.com/an-tao/drogon
@@ -15,84 +15,105 @@
 #include "HttpFileImpl.h"
 #include "HttpAppFrameworkImpl.h"
 #include <drogon/MultiPart.h>
+#include <drogon/utils/Utilities.h>
 #include <fstream>
 #include <iostream>
+#include <algorithm>
+#include <filesystem>
 
 using namespace drogon;
 
-int HttpFileImpl::save(const std::string &path) const
-{
-    assert(!path.empty());
-    if (fileName_ == "")
-        return -1;
-    std::string filename;
-    auto tmpPath = path;
-    if (path[0] == '/' ||
-        (path.length() >= 2 && path[0] == '.' && path[1] == '/') ||
-        (path.length() >= 3 && path[0] == '.' && path[1] == '.' &&
-         path[2] == '/') ||
-        path == "." || path == "..")
-    {
-        // Absolute or relative path
-    }
-    else
-    {
-        auto &uploadPath = HttpAppFrameworkImpl::instance().getUploadPath();
-        if (uploadPath[uploadPath.length() - 1] == '/')
-            tmpPath = uploadPath + path;
-        else
-            tmpPath = uploadPath + "/" + path;
-    }
-
-    if (utils::createPath(tmpPath) < 0)
-        return -1;
-
-    if (tmpPath[tmpPath.length() - 1] != '/')
-    {
-        filename = tmpPath + "/";
-        filename.append(fileName_.data(), fileName_.length());
-    }
-    else
-        filename = tmpPath.append(fileName_.data(), fileName_.length());
-
-    return saveTo(filename);
-}
-int HttpFileImpl::save() const
+int HttpFileImpl::save() const noexcept
 {
     return save(HttpAppFrameworkImpl::instance().getUploadPath());
 }
-int HttpFileImpl::saveAs(const std::string &filename) const
+
+int HttpFileImpl::save(const std::string &path) const noexcept
 {
-    assert(!filename.empty());
-    auto pathAndFileName = filename;
-    if (filename[0] == '/' ||
-        (filename.length() >= 2 && filename[0] == '.' && filename[1] == '/') ||
-        (filename.length() >= 3 && filename[0] == '.' && filename[1] == '.' &&
-         filename[2] == '/'))
+    assert(!path.empty());
+    if (fileName_.empty())
+        return -1;
+    std::filesystem::path fsUploadDir(utils::toNativePath(path));
+
+    if (fsUploadDir.is_absolute())
+    {  // do nothing
+    }
+    else if ((!fsUploadDir.has_parent_path() ||
+              (fsUploadDir.begin()->string() != "." &&
+               fsUploadDir.begin()->string() != "..")))
     {
-        // Absolute or relative path
+        fsUploadDir = utils::toNativePath(
+                          HttpAppFrameworkImpl::instance().getUploadPath()) /
+                      fsUploadDir;
     }
     else
     {
-        auto &uploadPath = HttpAppFrameworkImpl::instance().getUploadPath();
-        if (uploadPath[uploadPath.length() - 1] == '/')
-            pathAndFileName = uploadPath + filename;
-        else
-            pathAndFileName = uploadPath + "/" + filename;
+        fsUploadDir = std::filesystem::current_path() / fsUploadDir;
     }
-    auto pathPos = pathAndFileName.rfind('/');
-    if (pathPos != std::string::npos)
+
+    fsUploadDir = std::filesystem::weakly_canonical(fsUploadDir);
+
+    if (!std::filesystem::exists(fsUploadDir))
     {
-        std::string path = pathAndFileName.substr(0, pathPos);
-        if (utils::createPath(path) < 0)
+        LOG_TRACE << "create path:" << fsUploadDir;
+        std::error_code err;
+        std::filesystem::create_directories(fsUploadDir, err);
+        if (err)
+        {
+            LOG_SYSERR;
             return -1;
+        }
     }
-    return saveTo(pathAndFileName);
+
+    std::filesystem::path fsSaveToPath(std::filesystem::weakly_canonical(
+        fsUploadDir / utils::toNativePath(fileName_)));
+    LOG_TRACE << "save to path:" << fsSaveToPath;
+    if (!std::equal(fsUploadDir.begin(),
+                    fsUploadDir.end(),
+                    fsSaveToPath.begin()))
+    {
+        LOG_ERROR
+            << "Attempt writing outside of upload directory detected. Path: "
+            << fileName_;
+        return -1;
+    }
+
+    return saveTo(fsSaveToPath);
 }
-int HttpFileImpl::saveTo(const std::string &pathAndFilename) const
+
+int HttpFileImpl::saveAs(const std::string &fileName) const noexcept
 {
-    LOG_TRACE << "save uploaded file:" << pathAndFilename;
-    std::ofstream file(pathAndFilename, std::ios::binary);
+    assert(!fileName.empty());
+    std::filesystem::path fsFileName(utils::toNativePath(fileName));
+    if (!fsFileName.is_absolute() && (!fsFileName.has_parent_path() ||
+                                      (fsFileName.begin()->string() != "." &&
+                                       fsFileName.begin()->string() != "..")))
+    {
+        std::filesystem::path fsUploadPath(utils::toNativePath(
+            HttpAppFrameworkImpl::instance().getUploadPath()));
+        fsFileName = fsUploadPath / fsFileName;
+    }
+    if (fsFileName.has_parent_path() &&
+        !std::filesystem::exists(fsFileName.parent_path()))
+    {
+        LOG_TRACE << "create path:" << fsFileName.parent_path();
+        std::error_code err;
+        std::filesystem::create_directories(fsFileName.parent_path(), err);
+        if (err)
+        {
+            LOG_SYSERR;
+            return -1;
+        }
+    }
+    return saveTo(fsFileName);
+}
+
+int HttpFileImpl::saveTo(
+    const std::filesystem::path &pathAndFileName) const noexcept
+{
+    LOG_TRACE << "save uploaded file:" << pathAndFileName;
+    auto wPath = utils::toNativePath(pathAndFileName.native());
+    std::ofstream file(wPath, std::ios::binary);
     if (file.is_open())
     {
         file.write(fileContent_.data(), fileContent_.size());
@@ -105,39 +126,60 @@ int HttpFileImpl::saveTo(const std::string &pathAndFilename) const
         return -1;
     }
 }
-std::string HttpFileImpl::getMd5() const
+
+std::string HttpFileImpl::getMd5() const noexcept
 {
     return utils::getMd5(fileContent_.data(), fileContent_.size());
 }
 
-const std::string &HttpFile::getFileName() const
+std::string HttpFileImpl::getSha256() const noexcept
+{
+    return utils::getSha256(fileContent_.data(), fileContent_.size());
+}
+
+std::string HttpFileImpl::getSha3() const noexcept
+{
+    return utils::getSha3(fileContent_.data(), fileContent_.size());
+}
+
+const std::string &HttpFile::getFileName() const noexcept
 {
     return implPtr_->getFileName();
 }
 
-void HttpFile::setFileName(const std::string &filename)
+void HttpFile::setFileName(const std::string &fileName) noexcept
 {
-    implPtr_->setFileName(filename);
+    implPtr_->setFileName(fileName);
 }
 
-void HttpFile::setFile(const char *data, size_t length)
+std::string_view HttpFile::getFileExtension() const noexcept
+{
+    return implPtr_->getFileExtension();
+}
+
+FileType HttpFile::getFileType() const noexcept
+{
+    return implPtr_->getFileType();
+}
+
+void HttpFile::setFile(const char *data, size_t length) noexcept
 {
     implPtr_->setFile(data, length);
 }
 
-int HttpFile::save() const
+int HttpFile::save() const noexcept
 {
     return implPtr_->save();
 }
 
-int HttpFile::save(const std::string &path) const
+int HttpFile::save(const std::string &path) const noexcept
 {
     return implPtr_->save(path);
 }
 
-int HttpFile::saveAs(const std::string &filename) const
+int HttpFile::saveAs(const std::string &fileName) const noexcept
 {
-    return implPtr_->saveAs(filename);
+    return implPtr_->saveAs(fileName);
 }
 
 size_t HttpFile::fileLength() const noexcept
@@ -145,17 +187,32 @@ size_t HttpFile::fileLength() const noexcept
     return implPtr_->fileLength();
 }
 
+drogon::ContentType HttpFile::getContentType() const noexcept
+{
+    return implPtr_->getContentType();
+}
+
 const char *HttpFile::fileData() const noexcept
 {
     return implPtr_->fileData();
 }
 
-std::string HttpFile::getMd5() const
+std::string HttpFile::getMd5() const noexcept
 {
     return implPtr_->getMd5();
 }
 
-HttpFile::HttpFile(std::shared_ptr<HttpFileImpl> &&implPtr)
+const std::string &HttpFile::getContentTransferEncoding() const noexcept
+{
+    return implPtr_->getContentTransferEncoding();
+}
+
+HttpFile::HttpFile(std::shared_ptr<HttpFileImpl> &&implPtr) noexcept
     : implPtr_(std::move(implPtr))
 {
+}
+
+const std::string &HttpFile::getItemName() const noexcept
+{
+    return implPtr_->getItemName();
 }

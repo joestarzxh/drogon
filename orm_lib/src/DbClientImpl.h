@@ -1,7 +1,7 @@
 /**
  *
- *  DbClientImpl.h
- *  An Tao
+ *  @file DbClientImpl.h
+ *  @author An Tao
  *
  *  Copyright 2018, An Tao.  All rights reserved.
  *  https://github.com/an-tao/drogon
@@ -33,40 +33,47 @@ class DbClientImpl : public DbClient,
 {
   public:
     DbClientImpl(const std::string &connInfo,
-                 const size_t connNum,
+                 size_t connNum,
+#if LIBPQ_SUPPORTS_BATCH_MODE
+                 ClientType type,
+                 bool autoBatch);
+#else
                  ClientType type);
-    virtual ~DbClientImpl() noexcept;
-    virtual void execSql(const char *sql,
-                         size_t sqlLength,
-                         size_t paraNum,
-                         std::vector<const char *> &&parameters,
-                         std::vector<int> &&length,
-                         std::vector<int> &&format,
-                         ResultCallback &&rcb,
-                         std::function<void(const std::exception_ptr &)>
-                             &&exceptCallback) override;
-    virtual std::shared_ptr<Transaction> newTransaction(
-        const std::function<void(bool)> &commitCallback = nullptr) override;
-    virtual void newTransactionAsync(
+#endif
+    ~DbClientImpl() noexcept override;
+    void execSql(const char *sql,
+                 size_t sqlLength,
+                 size_t paraNum,
+                 std::vector<const char *> &&parameters,
+                 std::vector<int> &&length,
+                 std::vector<int> &&format,
+                 ResultCallback &&rcb,
+                 std::function<void(const std::exception_ptr &)>
+                     &&exceptCallback) override;
+    std::shared_ptr<Transaction> newTransaction(
+        const std::function<void(bool)> &commitCallback =
+            std::function<void(bool)>()) noexcept(false) override;
+    void newTransactionAsync(
         const std::function<void(const std::shared_ptr<Transaction> &)>
             &callback) override;
-    virtual bool hasAvailableConnections() const noexcept override;
+    bool hasAvailableConnections() const noexcept override;
+
+    void setTimeout(double timeout) override
+    {
+        timeout_ = timeout;
+    }
+
+    void init();
+    void closeAll() override;
 
   private:
-    size_t connectionsNumber_;
+    size_t numberOfConnections_;
     trantor::EventLoopThreadPool loops_;
     std::shared_ptr<SharedMutex> sharedMutexPtr_;
-
-    void execSql(
-        const DbConnectionPtr &conn,
-        string_view &&sql,
-        size_t paraNum,
-        std::vector<const char *> &&parameters,
-        std::vector<int> &&length,
-        std::vector<int> &&format,
-        ResultCallback &&rcb,
-        std::function<void(const std::exception_ptr &)> &&exceptCallback);
-
+    double timeout_{-1.0};
+#if LIBPQ_SUPPORTS_BATCH_MODE
+    bool autoBatch_{false};
+#endif
     DbConnectionPtr newConnection(trantor::EventLoop *loop);
 
     void makeTrans(
@@ -78,12 +85,22 @@ class DbClientImpl : public DbClient,
     std::unordered_set<DbConnectionPtr> readyConnections_;
     std::unordered_set<DbConnectionPtr> busyConnections_;
 
-    std::queue<std::function<void(const std::shared_ptr<Transaction> &)>>
+    std::list<std::shared_ptr<
+        std::function<void(const std::shared_ptr<Transaction> &)>>>
         transCallbacks_;
 
     std::deque<std::shared_ptr<SqlCmd>> sqlCmdBuffer_;
 
     void handleNewTask(const DbConnectionPtr &connPtr);
+    void execSqlWithTimeout(
+        const char *sql,
+        size_t sqlLength,
+        size_t paraNum,
+        std::vector<const char *> &&parameters,
+        std::vector<int> &&length,
+        std::vector<int> &&format,
+        ResultCallback &&rcb,
+        std::function<void(const std::exception_ptr &)> &&exceptCallback);
 };
 
 }  // namespace orm

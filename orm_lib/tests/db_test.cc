@@ -1,7 +1,7 @@
 /**
  *
- *  db_test.cc
- *  An Tao
+ *  @file db_test.cc
+ *  @author An Tao
  *
  *  Copyright 2018, An Tao.  All rights reserved.
  *  Use of this source code is governed by a MIT license
@@ -12,93 +12,181 @@
  *  Drogon database test program
  *
  */
+#define DROGON_TEST_MAIN
+#include <drogon/HttpAppFramework.h>
 #include <drogon/config.h>
+#include <drogon/drogon_test.h>
+#include <drogon/orm/CoroMapper.h>
 #include <drogon/orm/DbClient.h>
+#include <drogon/orm/DbTypes.h>
+#include <string_view>
+#include <drogon/orm/QueryBuilder.h>
 #include <trantor/utils/Logger.h>
+
+#include <stdlib.h>
 #include <chrono>
 #include <iostream>
+#include <string>
 #include <thread>
-#include <stdlib.h>
+#include <vector>
 
 #include "mysql/Users.h"
+#include "mysql/Wallets.h"
+#include "mysql/Blog.h"
+#include "mysql/Category.h"
+#include "mysql/BlogTag.h"
+#include "mysql/Tag.h"
+
 #include "postgresql/Users.h"
+#include "postgresql/Wallets.h"
+#include "postgresql/Blog.h"
+#include "postgresql/Category.h"
+#include "postgresql/BlogTag.h"
+#include "postgresql/Tag.h"
+
 #include "sqlite3/Users.h"
+#include "sqlite3/Wallets.h"
+#include "sqlite3/Blog.h"
+#include "sqlite3/Category.h"
+#include "sqlite3/BlogTag.h"
+#include "sqlite3/Tag.h"
 
 using namespace std::chrono_literals;
 using namespace drogon::orm;
 
-#define RESET "\033[0m"
-#define RED "\033[31m"   /* Red */
-#define GREEN "\033[32m" /* Green */
-
-constexpr int postgre_tests = 43;
-constexpr int mysql_tests = 45;
-constexpr int sqlite_tests = 47;
-
-int test_count = 0;
-int counter = 0;
-int gLoops = 1;
-std::promise<int> pro;
-auto globalf = pro.get_future();
-
-using namespace std::chrono_literals;
-
-int get_test_count();
-
-void addCount(int &count, std::promise<int> &pro)
+void expFunction(const DrogonDbException &e)
 {
-    ++count;
-    // LOG_DEBUG << count;
-    if (count == test_count)
-    {
-        pro.set_value(1);
-    }
 }
+#if USE_POSTGRESQL
+DbClientPtr postgreClient;
 
-void testOutput(bool isGood, const std::string &testMessage)
+DROGON_TEST(PostgreTest)
 {
-    if (isGood)
-    {
-        std::cout << GREEN << counter + 1 << ".\t" << testMessage << "\t\tOK\n";
-        std::cout << RESET;
-        addCount(counter, pro);
-    }
-    else
-    {
-        std::cout << RED << testMessage << "\t\tBAD\n";
-        std::cout << RESET;
-        exit(1);
-    }
-}
+    auto &clientPtr = postgreClient;
 
-void doPostgreTest(const drogon::orm::DbClientPtr &clientPtr)
-{
+    // Test bugfix #1588
+    // PgBatchConnection.cc did not report error message to application
+    try
+    {
+        clientPtr->execSqlSync("select * from t_not_exists");
+    }
+    catch (const DrogonDbException &e)
+    {
+        MANDATE(!std::string{e.base().what()}.empty());
+    }
+
     // Prepare the test environment
-    *clientPtr << "DROP TABLE IF EXISTS USERS" >> [](const Result &r) {
-        testOutput(true, "postgresql - Prepare the test environment(0)");
-    } >> [](const DrogonDbException &e) {
-        std::cerr << e.base().what() << std::endl;
-        testOutput(false, "postgresql - Prepare the test environment(0)");
+    *clientPtr << "DROP TABLE IF EXISTS USERS" >> [TEST_CTX,
+                                                   clientPtr](const Result &r) {
+        SUCCESS();
+        clientPtr->execSqlAsync(
+            "select 1 as result",
+            [TEST_CTX](const Result &r) { MANDATE(r.size() == 1); },
+            expFunction);
+    } >> [TEST_CTX](const DrogonDbException &e) {
+        FAULT("postgresql - Prepare the test environment(0) what():",
+              e.base().what());
     };
-    *clientPtr << "CREATE TABLE users \
-        (\
-            user_id character varying(32),\
-            user_name character varying(64),\
-            password character varying(64),\
-            org_name character varying(20),\
-            signature character varying(50),\
-            avatar_id character varying(32),\
-            id serial PRIMARY KEY,\
-            salt character varying(20),\
-            admin boolean DEFAULT false,\
-            CONSTRAINT user_id_org UNIQUE(user_id, org_name)\
-        )" >>
-        [](const Result &r) {
-            testOutput(true, "postgresql - Prepare the test environment(1)");
-        } >>
-        [](const DrogonDbException &e) {
-            std::cerr << e.base().what() << std::endl;
-            testOutput(false, "postgresql - Prepare the test environment(1)");
+    *clientPtr << "CREATE TABLE users "
+                  "("
+                  "    user_id character varying(32),"
+                  "    user_name character varying(64),"
+                  "    password character varying(64),"
+                  "    org_name character varying(20),"
+                  "    signature character varying(50),"
+                  "    avatar_id character varying(32),"
+                  "    id serial PRIMARY KEY,"
+                  "    salt character varying(20),"
+                  "    admin boolean DEFAULT false,"
+                  "    CONSTRAINT user_id_org UNIQUE(user_id, org_name)"
+                  ")" >>
+        [TEST_CTX](const Result &r) { SUCCESS(); } >>
+        [TEST_CTX](const DrogonDbException &e) {
+            FAULT("postgresql - Prepare the test environment(1) what():",
+                  e.base().what());
+        };
+    // wallets table one-to-one with users table
+    *clientPtr << "DROP TABLE IF EXISTS wallets" >>
+        [TEST_CTX](const Result &r) { SUCCESS(); } >>
+        [TEST_CTX](const DrogonDbException &e) {
+            FAULT("postgresql - Prepare the test environment(2) what():",
+                  e.base().what());
+        };
+    *clientPtr << "CREATE TABLE wallets ("
+                  "    id serial PRIMARY KEY,"
+                  "    user_id character varying(32) DEFAULT NULL,"
+                  "    amount numeric(16,2) DEFAULT NULL"
+                  ")" >>
+        [TEST_CTX](const Result &r) { SUCCESS(); } >>
+        [TEST_CTX](const DrogonDbException &e) {
+            FAULT("postgresql - Prepare the test environment(3) what():",
+                  e.base().what());
+        };
+    // blog
+    *clientPtr << "DROP TABLE IF EXISTS blog" >> [TEST_CTX](const Result &r) {
+        SUCCESS();
+    } >> [TEST_CTX](const DrogonDbException &e) {
+        FAULT("postgresql - Prepare the test environment(4) what():",
+              e.base().what());
+    };
+    *clientPtr << "CREATE TABLE blog ("
+                  "    id serial PRIMARY KEY,"
+                  "    title character varying(30) DEFAULT NULL,"
+                  "    category_id int4 DEFAULT NULL"
+                  ")" >>
+        [TEST_CTX](const Result &r) { SUCCESS(); } >>
+        [TEST_CTX](const DrogonDbException &e) {
+            FAULT("postgresql - Prepare the test environment(5) what():",
+                  e.base().what());
+        };
+    // category table one-to-many with blog table
+    *clientPtr << "DROP TABLE IF EXISTS category" >>
+        [TEST_CTX](const Result &r) { SUCCESS(); } >>
+        [TEST_CTX](const DrogonDbException &e) {
+            FAULT("postgresql - Prepare the test environment(6) what():",
+                  e.base().what());
+        };
+    *clientPtr << "CREATE TABLE category ("
+                  "    id serial PRIMARY KEY,"
+                  "    name character varying(30) DEFAULT NULL"
+                  ")" >>
+        [TEST_CTX](const Result &r) { SUCCESS(); } >>
+        [TEST_CTX](const DrogonDbException &e) {
+            FAULT("postgresql - Prepare the test environment(7) what():",
+                  e.base().what());
+        };
+    // tag table many-to-many with blog table
+    *clientPtr << "DROP TABLE IF EXISTS tag" >> [TEST_CTX](const Result &r) {
+        SUCCESS();
+    } >> [TEST_CTX](const DrogonDbException &e) {
+        FAULT("postgresql - Prepare the test environment(8) what():",
+              e.base().what());
+    };
+    *clientPtr << "CREATE TABLE tag ("
+                  "    id serial PRIMARY KEY,"
+                  "    name character varying(30) DEFAULT NULL"
+                  ")" >>
+        [TEST_CTX](const Result &r) { SUCCESS(); } >>
+        [TEST_CTX](const DrogonDbException &e) {
+            FAULT("postgresql - Prepare the test environment(9) what():",
+                  e.base().what());
+        };
+    // blog_tag table is an intermediate table
+    *clientPtr << "DROP TABLE IF EXISTS blog_tag" >>
+        [TEST_CTX](const Result &r) { SUCCESS(); } >>
+        [TEST_CTX](const DrogonDbException &e) {
+            FAULT("postgresql - Prepare the test environment(10) what():",
+                  e.base().what());
+        };
+    *clientPtr << "CREATE TABLE blog_tag ("
+                  "    blog_id int4 NOT NULL,"
+                  "    tag_id int4 NOT NULL,"
+                  "    CONSTRAINT blog_tag_pkey PRIMARY KEY (blog_id, tag_id)"
+                  ")" >>
+        [TEST_CTX](const Result &r) { SUCCESS(); } >>
+        [TEST_CTX](const DrogonDbException &e) {
+            FAULT("postgresql - Prepare the test environment(11) what():",
+                  e.base().what());
         };
     /// Test1:DbClient streaming-type interface
     /// 1.1 insert,non-blocking
@@ -108,112 +196,84 @@ void doPostgreTest(const drogon::orm::DbClientPtr &clientPtr)
                << "postgresql"
                << "123"
                << "default" >>
-        [](const Result &r) {
+        [TEST_CTX](const Result &r) {
             // std::cout << "id=" << r[0]["id"].as<int64_t>() << std::endl;
-            testOutput(r[0]["id"].as<int64_t>() == 1,
-                       "postgresql - DbClient streaming-type interface(0)");
+            MANDATE(r[0]["id"].as<int64_t>() == 1);
         } >>
-        [](const DrogonDbException &e) {
-            std::cerr << e.base().what() << std::endl;
-            testOutput(false,
-                       "postgresql - DbClient streaming-type interface(0)");
+        [TEST_CTX](const DrogonDbException &e) {
+            FAULT("postgresql - DbClient streaming-type interface(0) what():",
+                  e.base().what());
         };
     /// 1.2 insert,blocking
-    *clientPtr << "insert into users (user_id,user_name,password,org_name) "
-                  "values($1,$2,$3,$4) returning *"
-               << "pg1"
-               << "postgresql1"
-               << "123"
-               << "default" << Mode::Blocking >>
-        [](const Result &r) {
+    *clientPtr
+            << "insert into users (user_id,user_name,admin,password,org_name) "
+               "values($1,$2,$3,$4,$5) returning *"
+            << "pg1"
+            << "postgresql1" << DefaultValue{} << "123"
+            << "default" << Mode::Blocking >>
+        [TEST_CTX](const Result &r) {
             // std::cout << "id=" << r[0]["id"].as<int64_t>() << std::endl;
-            testOutput(r[0]["id"].as<int64_t>() == 2,
-                       "postgresql - DbClient streaming-type interface(1)");
+            MANDATE(r[0]["id"].as<int64_t>() == 2);
         } >>
-        [](const DrogonDbException &e) {
-            std::cerr << e.base().what() << std::endl;
-            testOutput(false,
-                       "postgresql - DbClient streaming-type interface(1)");
+        [TEST_CTX](const DrogonDbException &e) {
+            FAULT("postgresql - DbClient streaming-type interface(1) what():",
+                  e.base().what());
         };
     /// 1.3 query,no-blocking
     *clientPtr << "select * from users where 1 = 1" << Mode::NonBlocking >>
-        [](const Result &r) {
-            testOutput(r.size() == 2,
-                       "postgresql - DbClient streaming-type interface(2)");
-        } >>
-        [](const DrogonDbException &e) {
-            std::cerr << e.base().what() << std::endl;
-            testOutput(false,
-                       "postgresql - DbClient streaming-type interface(2)");
+        [TEST_CTX](const Result &r) { MANDATE(r.size() == 2); } >>
+        [TEST_CTX](const DrogonDbException &e) {
+            FAULT("postgresql - DbClient streaming-type interface(2) what():",
+                  e.base().what());
         };
     /// 1.4 query,blocking
     *clientPtr << "select * from users where 1 = 1" << Mode::Blocking >>
-        [](const Result &r) {
-            testOutput(r.size() == 2,
-                       "postgresql - DbClient streaming-type interface(3)");
-        } >>
-        [](const DrogonDbException &e) {
-            std::cerr << e.base().what() << std::endl;
-            testOutput(false,
-                       "postgresql - DbClient streaming-type interface(3)");
+        [TEST_CTX](const Result &r) { MANDATE(r.size() == 2); } >>
+        [TEST_CTX](const DrogonDbException &e) {
+            FAULT("postgresql - DbClient streaming-type interface(3) what():",
+                  e.base().what());
         };
     /// 1.5 query,blocking
     int count = 0;
     *clientPtr << "select user_name, user_id, id from users where 1 = 1"
                << Mode::Blocking >>
-        [&count](bool isNull,
-                 const std::string &name,
-                 std::string &&user_id,
-                 int id) {
+        [&count, TEST_CTX](bool isNull,
+                           const std::string &name,
+                           std::string &&user_id,
+                           int id) {
             if (!isNull)
                 ++count;
             else
-            {
-                testOutput(count == 2,
-                           "postgresql - DbClient streaming-type interface(4)");
-            }
+                MANDATE(count == 2);
         } >>
-        [](const DrogonDbException &e) {
-            std::cerr << e.base().what() << std::endl;
-            testOutput(false,
-                       "postgresql - DbClient streaming-type interface(4)");
+        [TEST_CTX](const DrogonDbException &e) {
+            FAULT("postgresql - DbClient streaming-type interface(4) what():",
+                  e.base().what());
         };
     /// 1.6 query, parameter binding
     *clientPtr << "select * from users where id = $1" << 1 >>
-        [](const Result &r) {
-            testOutput(r.size() == 1,
-                       "postgresql - DbClient streaming-type interface(5)");
-        } >>
-        [](const DrogonDbException &e) {
-            std::cerr << e.base().what() << std::endl;
-            testOutput(false,
-                       "postgresql - DbClient streaming-type interface(5)");
+        [TEST_CTX](const Result &r) { MANDATE(r.size() == 1); } >>
+        [TEST_CTX](const DrogonDbException &e) {
+            FAULT("postgresql - DbClient streaming-type interface(5) what():",
+                  e.base().what());
         };
     /// 1.7 query, parameter binding
     *clientPtr << "select * from users where user_id = $1 and user_name = $2"
                << "pg1"
                << "postgresql1" >>
-        [](const Result &r) {
-            testOutput(r.size() == 1,
-                       "postgresql - DbClient streaming-type interface(6)");
-        } >>
-        [](const DrogonDbException &e) {
-            std::cerr << e.base().what() << std::endl;
-            testOutput(false,
-                       "postgresql - DbClient streaming-type interface(6)");
+        [TEST_CTX](const Result &r) { MANDATE(r.size() == 1); } >>
+        [TEST_CTX](const DrogonDbException &e) {
+            FAULT("postgresql - DbClient streaming-type interface(6) what():",
+                  e.base().what());
         };
     /// 1.8 delete
     *clientPtr << "delete from users where user_id = $1 and user_name = $2"
                << "pg1"
                << "postgresql1" >>
-        [](const Result &r) {
-            testOutput(r.affectedRows() == 1,
-                       "postgresql - DbClient streaming-type interface(7)");
-        } >>
-        [](const DrogonDbException &e) {
-            std::cerr << e.base().what() << std::endl;
-            testOutput(false,
-                       "postgresql - DbClient streaming-type interface(7)");
+        [TEST_CTX](const Result &r) { MANDATE(r.affectedRows() == 1); } >>
+        [TEST_CTX](const DrogonDbException &e) {
+            FAULT("postgresql - DbClient streaming-type interface(7) what():",
+                  e.base().what());
         };
     /// 1.9 update
     *clientPtr << "update users set user_id = $1, user_name = $2 where user_id "
@@ -222,41 +282,31 @@ void doPostgreTest(const drogon::orm::DbClientPtr &clientPtr)
                << "postgresql1"
                << "pg"
                << "postgresql" >>
-        [](const Result &r) {
-            testOutput(r.affectedRows() == 1,
-                       "postgresql - DbClient streaming-type interface(8)");
-        } >>
-        [](const DrogonDbException &e) {
-            std::cerr << e.base().what() << std::endl;
-            testOutput(false,
-                       "postgresql - DbClient streaming-type interface(8)");
+        [TEST_CTX](const Result &r) { MANDATE(r.affectedRows() == 1); } >>
+        [TEST_CTX](const DrogonDbException &e) {
+            FAULT("postgresql - DbClient streaming-type interface(8) what():",
+                  e.base().what());
         };
     /// 1.10 clean up
     *clientPtr << "truncate table users restart identity" >>
-        [](const Result &r) {
-            testOutput(true,
-                       "postgresql - DbClient streaming-type interface(9)");
-        } >>
-        [](const DrogonDbException &e) {
-            std::cerr << "error:" << e.base().what() << std::endl;
-            testOutput(false,
-                       "postgresql - DbClient streaming-type interface(9)");
+        [TEST_CTX](const Result &r) { SUCCESS(); } >>
+        [TEST_CTX](const DrogonDbException &e) {
+            FAULT("postgresql - DbClient streaming-type interface(9) what():",
+                  e.base().what());
         };
     /// Test asynchronous method
     /// 2.1 insert
     clientPtr->execSqlAsync(
-        "insert into users \
-        (user_id,user_name,password,org_name) \
-        values($1,$2,$3,$4) returning *",
-        [](const Result &r) {
+        "insert into users "
+        "(user_id,user_name,password,org_name) "
+        "values($1,$2,$3,$4) returning *",
+        [TEST_CTX](const Result &r) {
             // std::cout << "id=" << r[0]["id"].as<int64_t>() << std::endl;
-            testOutput(r[0]["id"].as<int64_t>() == 1,
-                       "postgresql - DbClient asynchronous interface(0)");
+            MANDATE(r[0]["id"].as<int64_t>() == 1);
         },
-        [](const DrogonDbException &e) {
-            std::cerr << e.base().what() << std::endl;
-            testOutput(false,
-                       "postgresql - DbClient asynchronous interface(0)");
+        [TEST_CTX](const DrogonDbException &e) {
+            FAULT("postgresql - DbClient asynchronous interface(0) what():",
+                  e.base().what());
         },
         "pg",
         "postgresql",
@@ -264,18 +314,16 @@ void doPostgreTest(const drogon::orm::DbClientPtr &clientPtr)
         "default");
     /// 2.2 insert
     clientPtr->execSqlAsync(
-        "insert into users \
-        (user_id,user_name,password,org_name) \
-        values($1,$2,$3,$4)",
-        [](const Result &r) {
+        "insert into users "
+        "(user_id,user_name,password,org_name) "
+        "values($1,$2,$3,$4)",
+        [TEST_CTX](const Result &r) {
             // std::cout << "id=" << r[0]["id"].as<int64_t>() << std::endl;
-            testOutput(r.affectedRows() == 1,
-                       "postgresql - DbClient asynchronous interface(1)");
+            MANDATE(r.affectedRows() == 1);
         },
-        [](const DrogonDbException &e) {
-            std::cerr << e.base().what() << std::endl;
-            testOutput(false,
-                       "postgresql - DbClient asynchronous interface(1)");
+        [TEST_CTX](const DrogonDbException &e) {
+            FAULT("postgresql - DbClient asynchronous interface(1) what():",
+                  e.base().what());
         },
         "pg1",
         "postgresql1",
@@ -284,53 +332,37 @@ void doPostgreTest(const drogon::orm::DbClientPtr &clientPtr)
     /// 2.3 query
     clientPtr->execSqlAsync(
         "select * from users where 1 = 1",
-        [](const Result &r) {
-            testOutput(r.size() == 2,
-                       "postgresql - DbClient asynchronous interface(2)");
-        },
-        [](const DrogonDbException &e) {
-            std::cerr << e.base().what() << std::endl;
-            testOutput(false,
-                       "postgresql - DbClient asynchronous interface(2)");
+        [TEST_CTX](const Result &r) { MANDATE(r.size() == 2); },
+        [TEST_CTX](const DrogonDbException &e) {
+            FAULT("postgresql - DbClient asynchronous interface(2) what():",
+                  e.base().what());
         });
     /// 2.2 query, parameter binding
     clientPtr->execSqlAsync(
         "select * from users where id = $1",
-        [](const Result &r) {
-            testOutput(r.size() == 1,
-                       "postgresql - DbClient asynchronous interface(3)");
-        },
-        [](const DrogonDbException &e) {
-            std::cerr << e.base().what() << std::endl;
-            testOutput(false,
-                       "postgresql - DbClient asynchronous interface(3)");
+        [TEST_CTX](const Result &r) { MANDATE(r.size() == 1); },
+        [TEST_CTX](const DrogonDbException &e) {
+            FAULT("postgresql - DbClient asynchronous interface(3) what():",
+                  e.base().what());
         },
         1);
-    /// 2.3 query, parameter binding
+    /// 2.3 query, parameter binding (std::string_view)
     clientPtr->execSqlAsync(
         "select * from users where user_id = $1 and user_name = $2",
-        [](const Result &r) {
-            testOutput(r.size() == 1,
-                       "postgresql - DbClient asynchronous interface(4)");
+        [TEST_CTX](const Result &r) { MANDATE(r.size() == 1); },
+        [TEST_CTX](const DrogonDbException &e) {
+            FAULT("postgresql - DbClient asynchronous interface(4) what():",
+                  e.base().what());
         },
-        [](const DrogonDbException &e) {
-            std::cerr << e.base().what() << std::endl;
-            testOutput(false,
-                       "postgresql - DbClient asynchronous interface(4)");
-        },
-        "pg1",
+        std::string_view("pg1"),
         "postgresql1");
     /// 2.4 delete
     clientPtr->execSqlAsync(
         "delete from users where user_id = $1 and user_name = $2",
-        [](const Result &r) {
-            testOutput(r.affectedRows() == 1,
-                       "postgresql - DbClient asynchronous interface(5)");
-        },
-        [](const DrogonDbException &e) {
-            std::cerr << e.base().what() << std::endl;
-            testOutput(false,
-                       "postgresql - DbClient asynchronous interface(5)");
+        [TEST_CTX](const Result &r) { MANDATE(r.affectedRows() == 1); },
+        [TEST_CTX](const DrogonDbException &e) {
+            FAULT("postgresql - DbClient asynchronous interface(5) what():",
+                  e.base().what());
         },
         "pg1",
         "postgresql1");
@@ -338,14 +370,10 @@ void doPostgreTest(const drogon::orm::DbClientPtr &clientPtr)
     clientPtr->execSqlAsync(
         "update users set user_id = $1, user_name = $2 where user_id "
         "= $3 and user_name = $4",
-        [](const Result &r) {
-            testOutput(r.affectedRows() == 1,
-                       "postgresql - DbClient asynchronous interface(6)");
-        },
-        [](const DrogonDbException &e) {
-            std::cerr << e.base().what() << std::endl;
-            testOutput(false,
-                       "postgresql - DbClient asynchronous interface(6)");
+        [TEST_CTX](const Result &r) { MANDATE(r.affectedRows() == 1); },
+        [TEST_CTX](const DrogonDbException &e) {
+            FAULT("postgresql - DbClient asynchronous interface(6) what():",
+                  e.base().what());
         },
         "pg1",
         "postgresql1",
@@ -354,13 +382,10 @@ void doPostgreTest(const drogon::orm::DbClientPtr &clientPtr)
     /// 2.6 clean up
     clientPtr->execSqlAsync(
         "truncate table users restart identity",
-        [](const Result &r) {
-            testOutput(true, "postgresql - DbClient asynchronous interface(7)");
-        },
-        [](const DrogonDbException &e) {
-            std::cerr << "error:" << e.base().what() << std::endl;
-            testOutput(false,
-                       "postgresql - DbClient asynchronous interface(7)");
+        [TEST_CTX](const Result &r) { SUCCESS(); },
+        [TEST_CTX](const DrogonDbException &e) {
+            FAULT("postgresql - DbClient asynchronous interface(7) what():",
+                  e.base().what());
         });
 
     /// Test synchronous method
@@ -374,13 +399,12 @@ void doPostgreTest(const drogon::orm::DbClientPtr &clientPtr)
             "postgresql",
             "123",
             "default");
-        testOutput(r[0]["id"].as<int64_t>() == 1,
-                   "postgresql - DbClient synchronous interface(0)");
+        MANDATE(r[0]["id"].as<int64_t>() == 1);
     }
     catch (const DrogonDbException &e)
     {
-        std::cerr << e.base().what() << std::endl;
-        testOutput(false, "postgresql - DbClient asynchronous interface(0)");
+        FAULT("postgresql - DbClient asynchronous interface(0) what():",
+              e.base().what());
     }
     /// 3.2 insert
     try
@@ -392,13 +416,12 @@ void doPostgreTest(const drogon::orm::DbClientPtr &clientPtr)
             "postgresql1",
             "123",
             "default");
-        testOutput(r.affectedRows() == 1,
-                   "postgresql - DbClient synchronous interface(1)");
+        MANDATE(r.affectedRows() == 1);
     }
     catch (const DrogonDbException &e)
     {
-        std::cerr << e.base().what() << std::endl;
-        testOutput(false, "postgresql - DbClient asynchronous interface(1)");
+        FAULT("postgresql - DbClient asynchronous interface(1) what():",
+              e.base().what());
     }
     /// 3.3 query
     try
@@ -407,13 +430,12 @@ void doPostgreTest(const drogon::orm::DbClientPtr &clientPtr)
             "select * from users where user_id=$1 and user_name=$2",
             "pg1",
             "postgresql1");
-        testOutput(r.size() == 1,
-                   "postgresql - DbClient synchronous interface(2)");
+        MANDATE(r.size() == 1);
     }
     catch (const DrogonDbException &e)
     {
-        std::cerr << e.base().what() << std::endl;
-        testOutput(false, "postgresql - DbClient asynchronous interface(2)");
+        FAULT("postgresql - DbClient asynchronous interface(2) what():",
+              e.base().what());
     }
     /// 3.4 query for none
     try
@@ -422,13 +444,12 @@ void doPostgreTest(const drogon::orm::DbClientPtr &clientPtr)
             "select * from users where user_id=$1 and user_name=$2",
             "pg111",
             "postgresql1");
-        testOutput(r.size() == 0,
-                   "postgresql - DbClient synchronous interface(3)");
+        MANDATE(r.size() == 0);
     }
     catch (const DrogonDbException &e)
     {
-        std::cerr << e.base().what() << std::endl;
-        testOutput(false, "postgresql - DbClient asynchronous interface(3)");
+        FAULT("postgresql - DbClient asynchronous interface(3) what():",
+              e.base().what());
     }
     /// 3.5 bad sql
     try
@@ -437,25 +458,23 @@ void doPostgreTest(const drogon::orm::DbClientPtr &clientPtr)
             "select * from users where user_id=$1 and user_name='1234'",
             "pg111",
             "postgresql1");
-        testOutput(r.size() == 0,
-                   "postgresql - DbClient synchronous interface(4)");
+        MANDATE(r.size() == 0);
     }
     catch (const DrogonDbException &e)
     {
-        // std::cerr << e.base().what() << std::endl;
-        testOutput(true, "postgresql - DbClient asynchronous interface(4)");
+        SUCCESS();
     }
     /// 3.6 clean up
     try
     {
         auto r =
             clientPtr->execSqlSync("truncate table users restart identity");
-        testOutput(true, "postgresql - DbClient synchronous interface(5)");
+        SUCCESS();
     }
     catch (const DrogonDbException &e)
     {
-        // std::cerr << e.base().what() << std::endl;
-        testOutput(false, "postgresql - DbClient asynchronous interface(5)");
+        FAULT("postgresql - DbClient asynchronous interface(5) what():",
+              e.base().what());
     }
     /// Test future interface
     /// 4.1 insert
@@ -469,13 +488,12 @@ void doPostgreTest(const drogon::orm::DbClientPtr &clientPtr)
     try
     {
         auto r = f.get();
-        testOutput(r[0]["id"].as<int64_t>() == 1,
-                   "postgresql - DbClient future interface(0)");
+        MANDATE(r[0]["id"].as<int64_t>() == 1);
     }
     catch (const DrogonDbException &e)
     {
-        std::cerr << e.base().what() << std::endl;
-        testOutput(false, "postgresql - DbClient future interface(0)");
+        FAULT("postgresql - DbClient future interface(0) what():",
+              e.base().what());
     }
     /// 4.2 insert
     f = clientPtr->execSqlAsyncFuture(
@@ -488,13 +506,12 @@ void doPostgreTest(const drogon::orm::DbClientPtr &clientPtr)
     try
     {
         auto r = f.get();
-        testOutput(r.affectedRows() == 1,
-                   "postgresql - DbClient future interface(1)");
+        MANDATE(r.affectedRows() == 1);
     }
     catch (const DrogonDbException &e)
     {
-        std::cerr << e.base().what() << std::endl;
-        testOutput(false, "postgresql - DbClient future interface(1)");
+        FAULT("postgresql - DbClient future interface(1) what():",
+              e.base().what());
     }
     /// 4.3 query
     f = clientPtr->execSqlAsyncFuture(
@@ -504,12 +521,12 @@ void doPostgreTest(const drogon::orm::DbClientPtr &clientPtr)
     try
     {
         auto r = f.get();
-        testOutput(r.size() == 1, "postgresql - DbClient future interface(2)");
+        MANDATE(r.size() == 1);
     }
     catch (const DrogonDbException &e)
     {
-        std::cerr << e.base().what() << std::endl;
-        testOutput(false, "postgresql - DbClient future interface(2)");
+        FAULT("postgresql - DbClient future interface(2) what():",
+              e.base().what());
     }
     /// 4.4 query for none
     f = clientPtr->execSqlAsyncFuture(
@@ -519,12 +536,12 @@ void doPostgreTest(const drogon::orm::DbClientPtr &clientPtr)
     try
     {
         auto r = f.get();
-        testOutput(r.size() == 0, "postgresql - DbClient future interface(3)");
+        MANDATE(r.size() == 0);
     }
     catch (const DrogonDbException &e)
     {
-        std::cerr << e.base().what() << std::endl;
-        testOutput(false, "postgresql - DbClient future interface(3)");
+        FAULT("postgresql - DbClient future interface(3) what():",
+              e.base().what());
     }
     /// 4.5 bad sql
     f = clientPtr->execSqlAsyncFuture(
@@ -534,24 +551,23 @@ void doPostgreTest(const drogon::orm::DbClientPtr &clientPtr)
     try
     {
         auto r = f.get();
-        testOutput(r.size() == 0, "postgresql - DbClient future interface(4)");
+        MANDATE(r.size() == 0);
     }
     catch (const DrogonDbException &e)
     {
-        // std::cerr << e.base().what() << std::endl;
-        testOutput(true, "postgresql - DbClient future interface(4)");
+        SUCCESS();
     }
     /// 4.6 clean up
     f = clientPtr->execSqlAsyncFuture("truncate table users restart identity");
     try
     {
         auto r = f.get();
-        testOutput(true, "postgresql - DbClient future interface(5)");
+        SUCCESS();
     }
     catch (const DrogonDbException &e)
     {
-        // std::cerr << e.base().what() << std::endl;
-        testOutput(false, "postgresql - DbClient future interface(5)");
+        FAULT("postgresql - DbClient future interface(5) what():",
+              e.base().what());
     }
 
     /// 5 Test Result and Row exception throwing
@@ -563,12 +579,11 @@ void doPostgreTest(const drogon::orm::DbClientPtr &clientPtr)
             "pg111",
             "postgresql1");
         r.at(0);
-        testOutput(false, "postgresql - Result throwing exceptions(0)");
+        FAULT("postgresql - Result throwing exceptions(0)");
     }
     catch (const DrogonDbException &e)
     {
-        std::cerr << e.base().what() << std::endl;
-        testOutput(true, "postgresql -  Result throwing exceptions(0)");
+        SUCCESS();
     }
     // 5.2 insert one just for setup
     try
@@ -580,13 +595,12 @@ void doPostgreTest(const drogon::orm::DbClientPtr &clientPtr)
             "postgresql",
             "123",
             "default");
-        testOutput(r[0]["id"].as<int64_t>() == 1,
-                   "postgresql - Row throwing exceptions(0)");
+        MANDATE(r[0]["id"].as<int64_t>() == 1);
     }
     catch (const DrogonDbException &e)
     {
-        std::cerr << e.base().what() << std::endl;
-        testOutput(false, "postgresql - Row throwing exceptions(0)");
+        FAULT("postgresql - Row throwing exceptions(0) what():",
+              e.base().what());
     }
 
     // 5.3 try to access nonexistent column by name
@@ -595,12 +609,11 @@ void doPostgreTest(const drogon::orm::DbClientPtr &clientPtr)
         auto r = clientPtr->execSqlSync("select * from users");
         auto row = r.at(0);
         row["imaginary_column"];
-        testOutput(false, "postgresql - Row throwing exceptions(1)");
+        FAULT("postgresql - Row throwing exceptions(1)");
     }
     catch (const DrogonDbException &e)
     {
-        std::cerr << e.base().what() << std::endl;
-        testOutput(true, "postgresql -  Row throwing exceptions(1)");
+        SUCCESS();
     }
 
     // 5.4 try to access nonexistent column by index
@@ -609,12 +622,11 @@ void doPostgreTest(const drogon::orm::DbClientPtr &clientPtr)
         auto r = clientPtr->execSqlSync("select * from users");
         auto row = r.at(0);
         row.at(420);
-        testOutput(false, "postgresql - Row throwing exceptions(2)");
+        FAULT("postgresql - Row throwing exceptions(2)");
     }
     catch (const DrogonDbException &e)
     {
-        std::cerr << e.base().what() << std::endl;
-        testOutput(true, "postgresql -  Row throwing exceptions(2)");
+        SUCCESS();
     }
 
     // 5.5 cleanup
@@ -622,18 +634,18 @@ void doPostgreTest(const drogon::orm::DbClientPtr &clientPtr)
     {
         auto r =
             clientPtr->execSqlSync("truncate table users restart identity");
-        testOutput(true, "postgresql - Row throwing exceptions(3)");
+        SUCCESS();
     }
     catch (const DrogonDbException &e)
     {
-        std::cerr << e.base().what() << std::endl;
-        testOutput(false, "postgresql -  Row throwing exceptions(3)");
+        FAULT("postgresql - Row throwing exceptions(3) what():",
+              e.base().what());
     }
 
     /// Test ORM mapper
     /// 6.1 insert, noneblocking
     using namespace drogon_model::postgres;
-    drogon::orm::Mapper<Users> mapper(clientPtr);
+    Mapper<Users> mapper(clientPtr);
     Users user;
     user.setUserId("pg");
     user.setUserName("postgres");
@@ -641,132 +653,942 @@ void doPostgreTest(const drogon::orm::DbClientPtr &clientPtr)
     user.setOrgName("default");
     mapper.insert(
         user,
-        [](Users ret) {
-            testOutput(ret.getPrimaryKey() == 1,
-                       "postgresql - ORM mapper asynchronous interface(0)");
-        },
-        [](const DrogonDbException &e) {
-            std::cerr << e.base().what() << std::endl;
-            testOutput(false,
-                       "postgresql - ORM mapper asynchronous interface(0)");
+        [TEST_CTX](Users ret) { MANDATE(ret.getPrimaryKey() == 1); },
+        [TEST_CTX](const DrogonDbException &e) {
+            FAULT("postgresql - ORM mapper asynchronous interface(0) what():",
+                  e.base().what());
         });
+
+    /// 6.1.5 insert future
+    user.setUserId("pg_future");
+    auto fu = mapper.insertFuture(user);
+    try
+    {
+        auto u = fu.get();
+        SUCCESS();
+    }
+    catch (const DrogonDbException &e)
+    {
+        FAULT(
+            "postgresql - ORM mapper asynchronous future interface(0) what():",
+            e.base().what());
+    }
+
     /// 6.2 insert
     user.setUserId("pg1");
     user.setUserName("postgres1");
     mapper.insert(
         user,
-        [](Users ret) {
-            testOutput(ret.getPrimaryKey() == 2,
-                       "postgresql - ORM mapper asynchronous interface(1)");
-        },
-        [](const DrogonDbException &e) {
-            std::cerr << e.base().what() << std::endl;
-            testOutput(false,
-                       "postgresql - ORM mapper asynchronous interface(1)");
+        [TEST_CTX](Users ret) { MANDATE(ret.getPrimaryKey() == 3); },
+        [TEST_CTX](const DrogonDbException &e) {
+            FAULT("postgresql - ORM mapper asynchronous interface(1) what():",
+                  e.base().what());
         });
     /// 6.3 select where in
     mapper.findBy(
         Criteria(Users::Cols::_id,
                  CompareOperator::In,
                  std::vector<int32_t>{2, 200}),
-        [](std::vector<Users> users) {
-            testOutput(users.size() == 1,
-                       "postgresql - ORM mapper asynchronous interface(2)");
-        },
-        [](const DrogonDbException &e) {
-            std::cerr << e.base().what() << std::endl;
-            testOutput(false,
-                       "postgresql - ORM mapper asynchronous interface(2)");
+        [TEST_CTX](std::vector<Users> users) { MANDATE(users.size() == 1); },
+        [TEST_CTX](const DrogonDbException &e) {
+            FAULT("postgresql - ORM mapper asynchronous interface(2) what():",
+                  e.base().what());
         });
     /// 6.3.5 count
     mapper.count(
-        drogon::orm::Criteria(Users::Cols::_id, CompareOperator::EQ, 2020),
-        [](const size_t c) {
-            testOutput(c == 0,
-                       "postgresql - ORM mapper asynchronous interface(3)");
-        },
-        [](const DrogonDbException &e) {
-            std::cerr << e.base().what() << std::endl;
-            testOutput(false,
-                       "postgresql - ORM mapper asynchronous interface(3)");
+        Criteria(Users::Cols::_id, CompareOperator::EQ, 2020),
+        [TEST_CTX](const size_t c) { MANDATE(c == 0); },
+        [TEST_CTX](const DrogonDbException &e) {
+            FAULT("postgresql - ORM mapper asynchronous interface(3) what():",
+                  e.base().what());
+        });
+    /// 6.3.6 custom where query
+    mapper.findBy(
+        Criteria("id <@ int4range($?, null)"_sql, 3),
+        [TEST_CTX](std::vector<Users> users) { MANDATE(users.size() == 1); },
+        [TEST_CTX](const DrogonDbException &e) {
+            FAULT("postgresql - ORM mapper asynchronous interface(4) what():",
+                  e.base().what());
+        });
+    /// 6.3.7 pagination
+    mapper.paginate(2, 1).findAll(
+        [TEST_CTX](std::vector<Users> users) { MANDATE(users.size() == 1); },
+        [TEST_CTX](const DrogonDbException &e) {
+            FAULT("postgresql - ORM mapper asynchronous interface(5) what():",
+                  e.base().what());
         });
     /// 6.4 find by primary key. blocking
     try
     {
         auto user = mapper.findByPrimaryKey(2);
-        testOutput(true, "postgresql - ORM mapper synchronous interface(0)");
+        SUCCESS();
         Users newUser;
         newUser.setId(user.getValueOfId());
         newUser.setSalt("xxx");
         auto c = mapper.update(newUser);
-        testOutput(c == 1, "postgresql - ORM mapper synchronous interface(1)");
+        MANDATE(c == 1);
     }
     catch (const DrogonDbException &e)
     {
-        std::cerr << e.base().what() << std::endl;
-        testOutput(false, "postgresql - ORM mapper synchronous interface(0)");
+        FAULT("postgresql - ORM mapper synchronous interface(0) what():",
+              e.base().what());
+    }
+    /// 6.5.1 update by criteria. blocking
+    try
+    {
+        auto user = mapper.findByPrimaryKey(2);
+        SUCCESS();
+        Users newUser;
+        newUser.setId(user.getValueOfId());
+        newUser.setSalt("xxx");
+        newUser.setUserName(user.getValueOfUserName());
+        auto c = mapper.update(newUser);
+        MANDATE(c == 1);
+        c = mapper.updateBy({Users::Cols::_avatar_id, Users::Cols::_salt},
+                            Criteria(Users::Cols::_user_id,
+                                     CompareOperator::EQ,
+                                     "pg"),
+                            "avatar of pg",
+                            "salt of pg");
+        MANDATE(c == 1);
+        c = mapper.updateBy({Users::Cols::_avatar_id, Users::Cols::_salt},
+                            Criteria(Users::Cols::_user_id,
+                                     CompareOperator::EQ,
+                                     "none"),
+                            "avatar of none",
+                            "salt of none");
+        MANDATE(c == 0);
+    }
+    catch (const DrogonDbException &e)
+    {
+        FAULT("postgresql - ORM mapper synchronous interface(1) what():",
+              e.base().what());
+    }
+
+    /// 6.5.2 update by criteria. asynchronous
+    {
+        std::vector<std::string> cols{Users::Cols::_avatar_id,
+                                      Users::Cols::_salt};
+        mapper.updateBy(
+            cols,
+            [TEST_CTX](const size_t c) { MANDATE(c == 1); },
+            [TEST_CTX](const DrogonDbException &e) {
+                FAULT(
+                    "postgresql - ORM mapper asynchronous updateBy "
+                    "interface(0) "
+                    "what():",
+                    e.base().what());
+            },
+            Criteria(Users::Cols::_user_id, CompareOperator::EQ, "pg"),
+            "avatar of pg",
+            "salt of pg");
+    }
+
+    /// Test ORM QueryBuilder
+    /// execSync
+    try
+    {
+        const std::vector<Users> users =
+            QueryBuilder<Users>{}.from("users").selectAll().execSync(clientPtr);
+        MANDATE(users.size() == 3);
+    }
+    catch (const DrogonDbException &e)
+    {
+        FAULT("postgresql - ORM QueryBuilder synchronous interface(0) what():",
+              e.base().what());
+    }
+    try
+    {
+        const Result users =
+            QueryBuilder<Users>{}.from("users").select("id").execSync(
+                clientPtr);
+        MANDATE(users.size() == 3);
+        for (const Row &u : users)
+        {
+            MANDATE(!u["id"].isNull());
+        }
+    }
+    catch (const DrogonDbException &e)
+    {
+        FAULT("postgresql - ORM QueryBuilder synchronous interface(1) what():",
+              e.base().what());
+    }
+    try
+    {
+        const Users user = QueryBuilder<Users>{}
+                               .from("users")
+                               .selectAll()
+                               .eq("id", "3")
+                               .limit(1)
+                               .single()
+                               .order("id", false)
+                               .execSync(clientPtr);
+        MANDATE(user.getPrimaryKey() == 3);
+    }
+    catch (const DrogonDbException &e)
+    {
+        FAULT("postgresql - ORM QueryBuilder synchronous interface(2) what():",
+              e.base().what());
+    }
+    try
+    {
+        const Row user = QueryBuilder<Users>{}
+                             .from("users")
+                             .select("id")
+                             .limit(1)
+                             .single()
+                             .order("id", false)
+                             .execSync(clientPtr);
+        MANDATE(user["id"].as<int32_t>() == 3);
+    }
+    catch (const DrogonDbException &e)
+    {
+        FAULT("postgresql - ORM QueryBuilder synchronous interface(3) what():",
+              e.base().what());
+    }
+
+    /// execAsyncFuture
+    {
+        std::future<std::vector<Users>> users =
+            QueryBuilder<Users>{}.from("users").selectAll().execAsyncFuture(
+                clientPtr);
+        try
+        {
+            const std::vector<Users> r = users.get();
+            MANDATE(r.size() == 3);
+        }
+        catch (const DrogonDbException &e)
+        {
+            FAULT(
+                "postgresql - ORM QueryBuilder asynchronous interface(0) "
+                "what():",
+                e.base().what());
+        }
+    }
+    {
+        std::future<Result> users =
+            QueryBuilder<Users>{}.from("users").select("id").execAsyncFuture(
+                clientPtr);
+        try
+        {
+            const Result r = users.get();
+            MANDATE(r.size() == 3);
+            for (const Row &u : r)
+            {
+                MANDATE(!u["id"].isNull());
+            }
+        }
+        catch (const DrogonDbException &e)
+        {
+            FAULT(
+                "postgresql - ORM QueryBuilder asynchronous interface(1) "
+                "what():",
+                e.base().what());
+        }
+    }
+    {
+        std::future<Users> user = QueryBuilder<Users>{}
+                                      .from("users")
+                                      .selectAll()
+                                      .eq("id", "3")
+                                      .limit(1)
+                                      .single()
+                                      .order("id", false)
+                                      .execAsyncFuture(clientPtr);
+        try
+        {
+            const Users r = user.get();
+            MANDATE(r.getPrimaryKey() == 3);
+        }
+        catch (const DrogonDbException &e)
+        {
+            FAULT(
+                "postgresql - ORM QueryBuilder asynchronous interface(2) "
+                "what():",
+                e.base().what());
+        }
+    }
+    {
+        std::future<Row> users = QueryBuilder<Users>{}
+                                     .from("users")
+                                     .select("id")
+                                     .limit(1)
+                                     .single()
+                                     .order("id", false)
+                                     .execAsyncFuture(clientPtr);
+        try
+        {
+            const Row r = users.get();
+            MANDATE(r["id"].as<int32_t>() == 3);
+        }
+        catch (const DrogonDbException &e)
+        {
+            FAULT(
+                "postgresql - ORM QueryBuilder asynchronous interface(3) "
+                "what():",
+                e.base().what());
+        }
+    }
+
+#ifdef __cpp_impl_coroutine
+    auto coro_test = [clientPtr, TEST_CTX]() -> drogon::Task<> {
+        /// 7 Test coroutines.
+        /// This is by no means comprehensive. But coroutine API is essentially
+        /// a wrapper around callbacks. The purpose is to test the interface
+        /// works 7.1 Basic queries
+        try
+        {
+            auto result =
+                co_await clientPtr->execSqlCoro("select * from users;");
+            MANDATE(result.size() != 0);
+        }
+        catch (const DrogonDbException &e)
+        {
+            FAULT("postgresql - DbClient coroutine interface(0) what():",
+                  e.base().what());
+        }
+        /// 7.2 Parameter binding
+        try
+        {
+            auto result = co_await clientPtr->execSqlCoro(
+                "select * from users where 1=$1;", 1);
+            MANDATE(result.size() != 0);
+        }
+        catch (const DrogonDbException &e)
+        {
+            FAULT("postgresql - DbClient coroutine interface(1) what():",
+                  e.base().what());
+        }
+        /// 7.3 CoroMapper
+        try
+        {
+            CoroMapper<Users> mapper(clientPtr);
+            auto user = co_await mapper.findByPrimaryKey(2);
+            SUCCESS();
+        }
+        catch (const DrogonDbException &e)
+        {
+            FAULT("postgresql - ORM mapper coroutine interface(0) what():",
+                  e.base().what());
+        }
+        try
+        {
+            CoroMapper<Users> mapper(clientPtr);
+            auto user = co_await mapper.findByPrimaryKey(314);
+            FAULT("postgresql - ORM mapper coroutine interface(1)");
+        }
+        catch (const DrogonDbException &e)
+        {
+            SUCCESS();
+        }
+        try
+        {
+            CoroMapper<Users> mapper(clientPtr);
+            auto users = co_await mapper.findAll();
+            auto count = co_await mapper.count();
+            MANDATE(users.size() == count);
+        }
+        catch (const DrogonDbException &e)
+        {
+            SUCCESS();
+        }
+        try
+        {
+            CoroMapper<Users> mapper(clientPtr);
+            auto users = co_await mapper.orderBy(Users::Cols::_user_id)
+                             .limit(2)
+                             .findAll();
+            MANDATE(users.size() == 2);
+            SUCCESS();
+        }
+        catch (const DrogonDbException &e)
+        {
+            FAULT("postgresql - ORM mapper coroutine interface(2) what():",
+                  e.base().what());
+        }
+        // CoroMapper::update
+        try
+        {
+            CoroMapper<Users> mapper(clientPtr);
+            auto user = co_await mapper.findByPrimaryKey(2);
+            SUCCESS();
+            Users newUser;
+            newUser.setId(user.getValueOfId());
+            newUser.setSalt("xxx");
+            size_t c = co_await mapper.update(newUser);
+            MANDATE(c == 1);
+            SUCCESS();
+        }
+        catch (const DrogonDbException &e)
+        {
+            FAULT("postgresql - ORM mapper coroutine interface(3) what():",
+                  e.base().what());
+        }
+        // CoroMapper::updateBy
+        try
+        {
+            CoroMapper<Users> mapper(clientPtr);
+            auto awaiter = mapper.updateBy(
+                {Users::Cols::_avatar_id, Users::Cols::_salt},
+                Criteria(Users::Cols::_user_id, CompareOperator::EQ, "pg"),
+                "avatar of pg",
+                "salt of pg");
+            size_t c = co_await awaiter;
+            MANDATE(c == 1);
+            // Can not compile if use co_await and initilizer_list together.
+            // Seems to be a bug in gcc.
+            std::vector<std::string> updateFields{Users::Cols::_avatar_id,
+                                                  Users::Cols::_salt};
+            c = co_await mapper.updateBy(updateFields,
+                                         Criteria(Users::Cols::_user_id,
+                                                  CompareOperator::EQ,
+                                                  "none"),
+                                         "avatar of none",
+                                         "salt of none");
+            MANDATE(c == 0);
+            auto count = co_await mapper.count();
+            // Use std::make_tuple to as an alternative to initializer_list
+            c = co_await mapper.updateBy(
+                std::make_tuple(Users::Cols::_avatar_id, Users::Cols::_salt),
+                Criteria(),
+                "avatar",
+                "salt");
+            MANDATE(c == count);
+            SUCCESS();
+        }
+        catch (const DrogonDbException &e)
+        {
+            FAULT("postgresql - ORM mapper coroutine interface(4) what():",
+                  e.base().what());
+        }
+        /// 7.4 Transactions
+        try
+        {
+            auto trans = co_await clientPtr->newTransactionCoro();
+            auto result =
+                co_await trans->execSqlCoro("select * from users where 1=$1;",
+                                            1);
+            MANDATE(result.size() != 0);
+        }
+        catch (const DrogonDbException &e)
+        {
+            FAULT(
+                "postgresql - DbClient coroutine transaction interface(0) "
+                "what():",
+                e.base().what());
+        }
+    };
+    drogon::sync_wait(coro_test());
+
+#endif
+
+    /// 8 Test ORM related query
+    /// 8.1 async
+    /// 8.1.1 one-to-one
+    Mapper<Wallets> walletsMapper(clientPtr);
+
+    /// prepare
+    {
+        Wallets wallet;
+        wallet.setUserId("pg");
+        wallet.setAmount("2000.00");
+        try
+        {
+            walletsMapper.insert(wallet);
+            SUCCESS();
+        }
+        catch (const DrogonDbException &e)
+        {
+            FAULT("postgresql - ORM mapper related prepare(0) what():",
+                  e.base().what());
+        }
+    }
+
+    /// users to wallets
+    {
+        Users user;
+        user.setUserId("pg");
+        user.getWallet(
+            clientPtr,
+            [TEST_CTX](Wallets r) {
+                MANDATE(r.getValueOfAmount() == "2000.00");
+            },
+            [TEST_CTX](const DrogonDbException &e) {
+                FAULT(
+                    "postgresql - ORM mapper related async one-to-one(0) "
+                    "what():",
+                    e.base().what());
+            });
+    }
+    /// users to wallets without data
+    {
+        Users user;
+        user.setUserId("pg1");
+        user.getWallet(
+            clientPtr,
+            [TEST_CTX](Wallets w) {
+                FAULT("postgresql - ORM mapper related async one-to-one(1)");
+            },
+            [TEST_CTX](const DrogonDbException &e) { SUCCESS(); });
+    }
+
+    /// 8.1.2 one-to-many
+    Mapper<Category> categoryMapper(clientPtr);
+    Mapper<Blog> blogMapper(clientPtr);
+
+    /// prepare
+    {
+        Category category;
+        category.setName("category1");
+        try
+        {
+            categoryMapper.insert(category);
+            SUCCESS();
+        }
+        catch (const DrogonDbException &e)
+        {
+            FAULT("postgresql - ORM mapper related prepare(1) what():",
+                  e.base().what());
+        }
+        category.setName("category2");
+        try
+        {
+            categoryMapper.insert(category);
+            SUCCESS();
+        }
+        catch (const DrogonDbException &e)
+        {
+            FAULT("postgresql - ORM mapper related prepare(2) what():",
+                  e.base().what());
+        }
+        Blog blog;
+        blog.setTitle("title1");
+        blog.setCategoryId(1);
+        try
+        {
+            blogMapper.insert(blog);
+            SUCCESS();
+        }
+        catch (const DrogonDbException &e)
+        {
+            FAULT("postgresql - ORM mapper related prepare(3) what():",
+                  e.base().what());
+        }
+        blog.setTitle("title2");
+        blog.setCategoryId(1);
+        try
+        {
+            blogMapper.insert(blog);
+            SUCCESS();
+        }
+        catch (const DrogonDbException &e)
+        {
+            FAULT("postgresql - ORM mapper related prepare(4) what():",
+                  e.base().what());
+        }
+        blog.setTitle("title3");
+        blog.setCategoryId(3);
+        try
+        {
+            blogMapper.insert(blog);
+            SUCCESS();
+        }
+        catch (const DrogonDbException &e)
+        {
+            FAULT("postgresql - ORM mapper related prepare(5) what():",
+                  e.base().what());
+        }
+    }
+
+    /// categories to blogs
+    {
+        Category category;
+        category.setId(1);
+        category.getBlogs(
+            clientPtr,
+            [TEST_CTX](std::vector<Blog> r) { MANDATE(r.size() == 2); },
+            [TEST_CTX](const DrogonDbException &e) {
+                FAULT(
+                    "postgresql - ORM mapper related async one-to-many(0) "
+                    "what():",
+                    e.base().what());
+            });
+    }
+    /// categories to blogs without data
+    {
+        Category category;
+        category.setId(2);
+        category.getBlogs(
+            clientPtr,
+            [TEST_CTX](std::vector<Blog> r) { MANDATE(r.size() == 0); },
+            [TEST_CTX](const DrogonDbException &e) {
+                FAULT(
+                    "postgresql - ORM mapper related async one-to-many(1) "
+                    "what():",
+                    e.base().what());
+            });
+    }
+    /// blogs to categories
+    {
+        Blog blog;
+        blog.setCategoryId(1);
+        blog.getCategory(
+            clientPtr,
+            [TEST_CTX](Category r) {
+                MANDATE(r.getValueOfName() == "category1");
+            },
+            [TEST_CTX](const DrogonDbException &e) {
+                FAULT(
+                    "postgresql - ORM mapper related async one-to-many(2) "
+                    "what():",
+                    e.base().what());
+            });
+    }
+    /// blogs to categories without data
+    {
+        Blog blog;
+        blog.setCategoryId(3);
+        blog.getCategory(
+            clientPtr,
+            [TEST_CTX](Category r) {
+                FAULT("postgresql - ORM mapper related async one-to-many(3)");
+            },
+            [TEST_CTX](const DrogonDbException &e) { SUCCESS(); });
+    }
+
+    /// 8.1.3 many-to-many
+    Mapper<BlogTag> blogTagMapper(clientPtr);
+    Mapper<Tag> tagMapper(clientPtr);
+
+    /// prepare
+    {
+        BlogTag blogTag;
+        blogTag.setBlogId(1);
+        blogTag.setTagId(1);
+        try
+        {
+            blogTagMapper.insert(blogTag);
+            SUCCESS();
+        }
+        catch (const DrogonDbException &e)
+        {
+            FAULT("postgresql - ORM mapper related prepare(6) what():",
+                  e.base().what());
+        }
+        blogTag.setBlogId(1);
+        blogTag.setTagId(2);
+        try
+        {
+            blogTagMapper.insert(blogTag);
+            SUCCESS();
+        }
+        catch (const DrogonDbException &e)
+        {
+            FAULT("postgresql - ORM mapper related prepare(7) what():",
+                  e.base().what());
+        }
+        Tag tag;
+        tag.setName("tag1");
+        try
+        {
+            tagMapper.insert(tag);
+            SUCCESS();
+        }
+        catch (const DrogonDbException &e)
+        {
+            FAULT("postgresql - ORM mapper related prepare(8) what():",
+                  e.base().what());
+        }
+        tag.setName("tag2");
+        try
+        {
+            tagMapper.insert(tag);
+            SUCCESS();
+        }
+        catch (const DrogonDbException &e)
+        {
+            FAULT("postgresql - ORM mapper related prepare(9) what():",
+                  e.base().what());
+        }
+    }
+
+    /// blogs to tags
+    {
+        Blog blog;
+        blog.setId(1);
+        blog.getTags(
+            clientPtr,
+            [TEST_CTX](std::vector<std::pair<Tag, BlogTag>> r) {
+                MANDATE(r.size() == 2);
+            },
+            [TEST_CTX](const DrogonDbException &e) {
+                FAULT(
+                    "postgresql - ORM mapper related async many-to-many(0) "
+                    "what():",
+                    e.base().what());
+            });
+    }
+
+    /// 8.2 async
+    /// 8.2.1 one-to-one
+    /// users to wallets
+    {
+        Users user;
+        user.setUserId("pg");
+        try
+        {
+            auto r = user.getWallet(clientPtr);
+            MANDATE(r.getValueOfAmount() == "2000.00");
+        }
+        catch (const DrogonDbException &e)
+        {
+            FAULT("postgresql - ORM mapper related sync one-to-one(0) what():",
+                  e.base().what());
+        }
+    }
+    /// users to wallets without data
+    {
+        Users user;
+        user.setUserId("pg1");
+        try
+        {
+            auto r = user.getWallet(clientPtr);
+            FAULT("postgresql - ORM mapper related sync one-to-one(1)");
+        }
+        catch (const DrogonDbException &e)
+        {
+            SUCCESS();
+        }
+    }
+
+    /// 8.2.2 one-to-many
+    /// categories to blogs
+    {
+        Category category;
+        category.setId(1);
+        try
+        {
+            auto r = category.getBlogs(clientPtr);
+            MANDATE(r.size() == 2);
+        }
+        catch (const DrogonDbException &e)
+        {
+            FAULT("postgresql - ORM mapper related sync one-to-many(0) what():",
+                  e.base().what());
+        }
+    }
+    /// categories to blogs without data
+    {
+        Category category;
+        category.setId(2);
+        try
+        {
+            auto r = category.getBlogs(clientPtr);
+            MANDATE(r.size() == 0);
+        }
+        catch (const DrogonDbException &e)
+        {
+            FAULT("postgresql - ORM mapper related sync one-to-many(1) what():",
+                  e.base().what());
+        }
+    }
+    /// blogs to categories
+    {
+        Blog blog;
+        blog.setCategoryId(1);
+        try
+        {
+            auto r = blog.getCategory(clientPtr);
+            MANDATE(r.getValueOfName() == "category1");
+        }
+        catch (const DrogonDbException &e)
+        {
+            FAULT("postgresql - ORM mapper related sync one-to-many(2) what():",
+                  e.base().what());
+        }
+    }
+    /// blogs to categories without data
+    {
+        Blog blog;
+        blog.setCategoryId(3);
+        try
+        {
+            auto r = blog.getCategory(clientPtr);
+            FAULT("postgresql - ORM mapper related sync one-to-many(3)");
+        }
+        catch (const DrogonDbException &e)
+        {
+            SUCCESS();
+        }
+    }
+
+    /// 8.2.3 many-to-many
+    /// blogs to tags
+    {
+        Blog blog;
+        blog.setId(1);
+        try
+        {
+            auto r = blog.getTags(clientPtr);
+            MANDATE(r.size() == 2);
+        }
+        catch (const DrogonDbException &e)
+        {
+            FAULT(
+                "postgresql - ORM mapper related sync many-to-many(0) what():",
+                e.base().what());
+        }
     }
 }
+#endif
 
-void doMysqlTest(const drogon::orm::DbClientPtr &clientPtr)
+#if USE_MYSQL
+DbClientPtr mysqlClient;
+
+DROGON_TEST(MySQLTest)
 {
+    auto &clientPtr = mysqlClient;
+    REQUIRE(clientPtr != nullptr);
     // Prepare the test environment
     *clientPtr << "CREATE DATABASE IF NOT EXISTS drogonTestMysql" >>
-        [](const Result &r) {
-            testOutput(true, "mysql - Prepare the test environment(0)");
+        [TEST_CTX, clientPtr](const Result &r) {
+            SUCCESS();
+            clientPtr->execSqlAsync(
+                "select 1 as result",
+                [TEST_CTX](const Result &r) { MANDATE(r.size() == 1); },
+                expFunction);
         } >>
-        [](const DrogonDbException &e) {
-            std::cerr << e.base().what() << std::endl;
-            testOutput(false, "mysql - Prepare the test environment(0)");
+        [TEST_CTX](const DrogonDbException &e) {
+            FAULT("mysql - Prepare the test environment(0) what():",
+                  e.base().what());
         };
-    *clientPtr << "USE drogonTestMysql" >> [](const Result &r) {
-        testOutput(true, "mysql - Prepare the test environment(0)");
-    } >> [](const DrogonDbException &e) {
-        std::cerr << e.base().what() << std::endl;
-        testOutput(false, "mysql - Prepare the test environment(0)");
+    *clientPtr << "USE drogonTestMysql" >> [TEST_CTX](const Result &r) {
+        SUCCESS();
+    } >> [TEST_CTX](const DrogonDbException &e) {
+        FAULT("mysql - Prepare the test environment(0) what():",
+              e.base().what());
     };
     // mysql is case sensitive
-    *clientPtr << "DROP TABLE IF EXISTS users" >> [](const Result &r) {
-        testOutput(true, "mysql - Prepare the test environment(1)");
-    } >> [](const DrogonDbException &e) {
-        std::cerr << e.base().what() << std::endl;
-        testOutput(false, "mysql - Prepare the test environment(1)");
+    *clientPtr << "DROP TABLE IF EXISTS users" >> [TEST_CTX](const Result &r) {
+        SUCCESS();
+    } >> [TEST_CTX](const DrogonDbException &e) {
+        FAULT("mysql - Prepare the test environment(1) what():",
+              e.base().what());
     };
-    *clientPtr << "CREATE TABLE users \
-        (\
-            id int(11) auto_increment PRIMARY KEY,\
-            user_id varchar(32),\
-            user_name varchar(64),\
-            password varchar(64),\
-            org_name varchar(20),\
-            signature varchar(50),\
-            avatar_id varchar(32),\
-            salt character varying(20),\
-            admin boolean DEFAULT false,\
-            CONSTRAINT user_id_org UNIQUE(user_id, org_name)\
-        )" >>
-        [](const Result &r) {
-            testOutput(true, "mysql - Prepare the test environment(2)");
-        } >>
-        [](const DrogonDbException &e) {
-            std::cerr << e.base().what() << std::endl;
-            testOutput(false, "mysql - Prepare the test environment(2)");
+    *clientPtr << "CREATE TABLE users "
+                  "("
+                  "    id int(11) auto_increment PRIMARY KEY,"
+                  "    user_id varchar(32),"
+                  "    user_name varchar(64),"
+                  "    password varchar(64),"
+                  "    org_name varchar(20),"
+                  "    signature varchar(50),"
+                  "    avatar_id varchar(32),"
+                  "    salt character varying(20),"
+                  "    admin boolean DEFAULT false,"
+                  "    CONSTRAINT user_id_org UNIQUE(user_id, org_name)"
+                  ")" >>
+        [TEST_CTX](const Result &r) { SUCCESS(); } >>
+        [TEST_CTX](const DrogonDbException &e) {
+            FAULT("mysql - Prepare the test environment(2) what():",
+                  e.base().what());
+        };
+    // wallets table one-to-one with users table
+    *clientPtr << "DROP TABLE IF EXISTS wallets" >>
+        [TEST_CTX](const Result &r) { SUCCESS(); } >>
+        [TEST_CTX](const DrogonDbException &e) {
+            FAULT("mysql - Prepare the test environment(3) what():",
+                  e.base().what());
+        };
+    *clientPtr << "CREATE TABLE `wallets` ("
+                  "    `id` int(11) AUTO_INCREMENT PRIMARY KEY,"
+                  "    `user_id` varchar(32) DEFAULT NULL,"
+                  "    `amount` decimal(16,2) DEFAULT NULL"
+                  ")" >>
+        [TEST_CTX](const Result &r) { SUCCESS(); } >>
+        [TEST_CTX](const DrogonDbException &e) {
+            FAULT("mysql - Prepare the test environment(4) what():",
+                  e.base().what());
+        };
+    // blog
+    *clientPtr << "DROP TABLE IF EXISTS blog" >> [TEST_CTX](const Result &r) {
+        SUCCESS();
+    } >> [TEST_CTX](const DrogonDbException &e) {
+        FAULT("mysql - Prepare the test environment(5) what():",
+              e.base().what());
+    };
+    *clientPtr << "CREATE TABLE `blog` ("
+                  "    `id` int(11) AUTO_INCREMENT PRIMARY KEY,"
+                  "    `title` varchar(30) DEFAULT NULL,"
+                  "    `category_id` int(11) DEFAULT NULL"
+                  ")" >>
+        [TEST_CTX](const Result &r) { SUCCESS(); } >>
+        [TEST_CTX](const DrogonDbException &e) {
+            FAULT("mysql - Prepare the test environment(6) what():",
+                  e.base().what());
+        };
+    // category table one-to-many with blog table
+    *clientPtr << "DROP TABLE IF EXISTS category" >>
+        [TEST_CTX](const Result &r) { SUCCESS(); } >>
+        [TEST_CTX](const DrogonDbException &e) {
+            FAULT("mysql - Prepare the test environment(7) what():",
+                  e.base().what());
+        };
+    *clientPtr << "CREATE TABLE `category` ("
+                  "    `id` int(11) AUTO_INCREMENT PRIMARY KEY,"
+                  "    `name` varchar(30) DEFAULT NULL"
+                  ")" >>
+        [TEST_CTX](const Result &r) { SUCCESS(); } >>
+        [TEST_CTX](const DrogonDbException &e) {
+            FAULT("mysql - Prepare the test environment(8) what():",
+                  e.base().what());
+        };
+    // tag table many-to-many with blog table
+    *clientPtr << "DROP TABLE IF EXISTS tag" >> [TEST_CTX](const Result &r) {
+        SUCCESS();
+    } >> [TEST_CTX](const DrogonDbException &e) {
+        FAULT("mysql - Prepare the test environment(9) what():",
+              e.base().what());
+    };
+    *clientPtr << "CREATE TABLE `tag` ("
+                  "    `id` int(11) AUTO_INCREMENT PRIMARY KEY,"
+                  "    `name` varchar(30) DEFAULT NULL"
+                  ")" >>
+        [TEST_CTX](const Result &r) { SUCCESS(); } >>
+        [TEST_CTX](const DrogonDbException &e) {
+            FAULT("mysql - Prepare the test environment(10) what():",
+                  e.base().what());
+        };
+    // blog_tag table is an intermediate table
+    *clientPtr << "DROP TABLE IF EXISTS blog_tag" >>
+        [TEST_CTX](const Result &r) { SUCCESS(); } >>
+        [TEST_CTX](const DrogonDbException &e) {
+            FAULT("mysql - Prepare the test environment(11) what():",
+                  e.base().what());
+        };
+    *clientPtr << "CREATE TABLE `blog_tag` ("
+                  "    `blog_id` int(11) NOT NULL,"
+                  "    `tag_id` int(11) NOT NULL,"
+                  "    PRIMARY KEY (`blog_id`,`tag_id`)"
+                  ")" >>
+        [TEST_CTX](const Result &r) { SUCCESS(); } >>
+        [TEST_CTX](const DrogonDbException &e) {
+            FAULT("mysql - Prepare the test environment(12) what():",
+                  e.base().what());
         };
     /// Test1:DbClient streaming-type interface
     /// 1.1 insert,non-blocking
-    *clientPtr << "insert into users (user_id,user_name,password,org_name) "
-                  "values(?,?,?,?)"
-               << "pg"
-               << "postgresql"
-               << "123"
-               << "default" >>
-        [](const Result &r) {
-            testOutput(r.insertId() == 1,
-                       "mysql - DbClient streaming-type interface(0)");
-        } >>
-        [](const DrogonDbException &e) {
-            std::cerr << e.base().what() << std::endl;
-            testOutput(false, "mysql - DbClient streaming-type interface(0)");
+    *clientPtr
+            << "insert into users (user_id,user_name,password,org_name,admin) "
+               "values(?,?,?,?,?)"
+            << "pg"
+            << "postgresql"
+            << "123"
+            << "default" << DefaultValue{} >>
+        [TEST_CTX](const Result &r) { MANDATE(r.insertId() == 1); } >>
+        [TEST_CTX](const DrogonDbException &e) {
+            FAULT("mysql - DbClient streaming-type interface(0) what():",
+                  e.base().what());
         };
     /// 1.2 insert,blocking
     *clientPtr << "insert into users (user_id,user_name,password,org_name) "
@@ -775,87 +1597,66 @@ void doMysqlTest(const drogon::orm::DbClientPtr &clientPtr)
                << "postgresql1"
                << "123"
                << "default" << Mode::Blocking >>
-        [](const Result &r) {
-            testOutput(r.insertId() == 2,
-                       "mysql - DbClient streaming-type interface(1)");
-        } >>
-        [](const DrogonDbException &e) {
-            std::cerr << e.base().what() << std::endl;
-            testOutput(false, "mysql - DbClient streaming-type interface(1)");
+        [TEST_CTX](const Result &r) { MANDATE(r.insertId() == 2); } >>
+        [TEST_CTX](const DrogonDbException &e) {
+            FAULT("mysql - DbClient streaming-type interface(1) what():",
+                  e.base().what());
         };
     /// 1.3 query,no-blocking
     *clientPtr << "select * from users where 1 = 1" << Mode::NonBlocking >>
-        [](const Result &r) {
-            testOutput(r.size() == 2,
-                       "mysql - DbClient streaming-type interface(2)");
-        } >>
-        [](const DrogonDbException &e) {
-            std::cerr << e.base().what() << std::endl;
-            testOutput(false, "mysql - DbClient streaming-type interface(2)");
+        [TEST_CTX](const Result &r) { MANDATE(r.size() == 2); } >>
+        [TEST_CTX](const DrogonDbException &e) {
+            FAULT("mysql - DbClient streaming-type interface(2) what():",
+                  e.base().what());
         };
     /// 1.4 query,blocking
     *clientPtr << "select * from users where 1 = 1" << Mode::Blocking >>
-        [](const Result &r) {
-            testOutput(r.size() == 2,
-                       "mysql - DbClient streaming-type interface(3)");
-        } >>
-        [](const DrogonDbException &e) {
-            std::cerr << e.base().what() << std::endl;
-            testOutput(false, "mysql - DbClient streaming-type interface(3)");
+        [TEST_CTX](const Result &r) { MANDATE(r.size() == 2); } >>
+        [TEST_CTX](const DrogonDbException &e) {
+            FAULT("mysql - DbClient streaming-type interface(3) what():",
+                  e.base().what());
         };
     /// 1.5 query,blocking
     int count = 0;
     *clientPtr << "select user_name, user_id, id from users where 1 = 1"
                << Mode::Blocking >>
-        [&count](bool isNull,
-                 const std::string &name,
-                 std::string &&user_id,
-                 int id) {
+        [&count, TEST_CTX](bool isNull,
+                           const std::string &name,
+                           std::string &&user_id,
+                           int id) {
             if (!isNull)
                 ++count;
             else
-            {
-                testOutput(count == 2,
-                           "mysql - DbClient streaming-type interface(4)");
-            }
+                MANDATE(count == 2);
         } >>
-        [](const DrogonDbException &e) {
-            std::cerr << e.base().what() << std::endl;
-            testOutput(false, "mysql - DbClient streaming-type interface(4)");
+        [TEST_CTX](const DrogonDbException &e) {
+            FAULT("mysql - DbClient streaming-type interface(4) what():",
+                  e.base().what());
         };
     /// 1.6 query, parameter binding
     *clientPtr << "select * from users where id = ?" << 1 >>
-        [](const Result &r) {
-            testOutput(r.size() == 1,
-                       "mysql - DbClient streaming-type interface(5)");
-        } >>
-        [](const DrogonDbException &e) {
-            std::cerr << e.base().what() << std::endl;
-            testOutput(false, "mysql - DbClient streaming-type interface(5)");
+        [TEST_CTX](const Result &r) { MANDATE(r.size() == 1); } >>
+        [TEST_CTX](const DrogonDbException &e) {
+            FAULT("mysql - DbClient streaming-type interface(5) what():",
+                  e.base().what());
         };
     /// 1.7 query, parameter binding
     *clientPtr << "select * from users where user_id = ? and user_name = ?"
                << "pg1"
                << "postgresql1" >>
-        [](const Result &r) {
-            testOutput(r.size() == 1,
-                       "mysql - DbClient streaming-type interface(6)");
-        } >>
-        [](const DrogonDbException &e) {
-            std::cerr << e.base().what() << std::endl;
-            testOutput(false, "mysql - DbClient streaming-type interface(6)");
+        [TEST_CTX](const Result &r) { MANDATE(r.size() == 1); } >>
+        [TEST_CTX](const DrogonDbException &e) {
+            FAULT("mysql - DbClient streaming-type interface(6) what():",
+                  e.base().what());
         };
     /// 1.8 delete
     *clientPtr << "delete from users where user_id = ? and user_name = ?"
                << "pg1"
                << "postgresql1" >>
-        [](const Result &r) {
-            testOutput(r.affectedRows() == 1,
-                       "mysql - DbClient streaming-type interface(7)");
-        } >>
-        [](const DrogonDbException &e) {
-            std::cerr << e.base().what() << std::endl;
-            testOutput(false, "mysql - DbClient streaming-type interface(7)");
+        [TEST_CTX](const Result &r) { MANDATE(r.affectedRows() == 1); } >>
+        [TEST_CTX](const DrogonDbException &e) {
+            FAULT("mysql - DbClient streaming-type interface(7) what():",
+                  e.base().what());
         };
     /// 1.9 update
     *clientPtr << "update users set user_id = ?, user_name = ? where user_id "
@@ -864,34 +1665,28 @@ void doMysqlTest(const drogon::orm::DbClientPtr &clientPtr)
                << "postgresql1"
                << "pg"
                << "postgresql" >>
-        [](const Result &r) {
-            testOutput(r.affectedRows() == 1,
-                       "mysql - DbClient streaming-type interface(8)");
-        } >>
-        [](const DrogonDbException &e) {
-            std::cerr << e.base().what() << std::endl;
-            testOutput(false, "mysql - DbClient streaming-type interface(8)");
+        [TEST_CTX](const Result &r) { MANDATE(r.affectedRows() == 1); } >>
+        [TEST_CTX](const DrogonDbException &e) {
+            FAULT("mysql - DbClient streaming-type interface(8) what():",
+                  e.base().what());
         };
     /// 1.10 truncate
-    *clientPtr << "truncate table users" >> [](const Result &r) {
-        testOutput(true, "mysql - DbClient streaming-type interface(9)");
-    } >> [](const DrogonDbException &e) {
-        std::cerr << "error:" << e.base().what() << std::endl;
-        testOutput(false, "mysql - DbClient streaming-type interface(9)");
+    *clientPtr << "truncate table users" >> [TEST_CTX](const Result &r) {
+        SUCCESS();
+    } >> [TEST_CTX](const DrogonDbException &e) {
+        FAULT("mysql - DbClient streaming-type interface(9) what():",
+              e.base().what());
     };
     /// Test asynchronous method
     /// 2.1 insert
     clientPtr->execSqlAsync(
-        "insert into users \
-        (user_id,user_name,password,org_name) \
-        values(?,?,?,?)",
-        [](const Result &r) {
-            testOutput(r.insertId() != 0,
-                       "mysql - DbClient asynchronous interface(0)");
-        },
-        [](const DrogonDbException &e) {
-            std::cerr << e.base().what() << std::endl;
-            testOutput(false, "mysql - DbClient asynchronous interface(0)");
+        "insert into users "
+        "(user_id,user_name,password,org_name) "
+        "values(?,?,?,?)",
+        [TEST_CTX](const Result &r) { MANDATE(r.insertId() != 0); },
+        [TEST_CTX](const DrogonDbException &e) {
+            FAULT("mysql - DbClient asynchronous interface(0) what():",
+                  e.base().what());
         },
         "pg",
         "postgresql",
@@ -899,16 +1694,13 @@ void doMysqlTest(const drogon::orm::DbClientPtr &clientPtr)
         "default");
     /// 2.2 insert
     clientPtr->execSqlAsync(
-        "insert into users \
-        (user_id,user_name,password,org_name) \
-        values(?,?,?,?)",
-        [](const Result &r) {
-            testOutput(r.affectedRows() == 1,
-                       "mysql - DbClient asynchronous interface(1)");
-        },
-        [](const DrogonDbException &e) {
-            std::cerr << e.base().what() << std::endl;
-            testOutput(false, "mysql - DbClient asynchronous interface(1)");
+        "insert into users "
+        "(user_id,user_name,password,org_name) "
+        "values(?,?,?,?)",
+        [TEST_CTX](const Result &r) { MANDATE(r.affectedRows() == 1); },
+        [TEST_CTX](const DrogonDbException &e) {
+            FAULT("mysql - DbClient asynchronous interface(1) what():",
+                  e.base().what());
         },
         "pg1",
         "postgresql1",
@@ -917,50 +1709,40 @@ void doMysqlTest(const drogon::orm::DbClientPtr &clientPtr)
     /// 2.3 query
     clientPtr->execSqlAsync(
         "select * from users where 1 = 1",
-        [](const Result &r) {
-            testOutput(r.size() == 2,
-                       "mysql - DbClient asynchronous interface(2)");
-        },
-        [](const DrogonDbException &e) {
-            std::cerr << e.base().what() << std::endl;
-            testOutput(false, "mysql - DbClient asynchronous interface(2)");
+        [TEST_CTX](const Result &r) { MANDATE(r.size() == 2); },
+        [TEST_CTX](const DrogonDbException &e) {
+            FAULT("mysql - DbClient asynchronous interface(2) what():",
+                  e.base().what());
         });
     /// 2.2 query, parameter binding
     clientPtr->execSqlAsync(
         "select * from users where id = ?",
-        [](const Result &r) {
+        [TEST_CTX](const Result &r) {
             // std::cout << r.size() << "\n";
-            testOutput(r.size() == 1,
-                       "mysql - DbClient asynchronous interface(3)");
+            MANDATE(r.size() == 1);
         },
-        [](const DrogonDbException &e) {
-            std::cerr << e.base().what() << std::endl;
-            testOutput(false, "mysql - DbClient asynchronous interface(3)");
+        [TEST_CTX](const DrogonDbException &e) {
+            FAULT("mysql - DbClient asynchronous interface(3) what():",
+                  e.base().what());
         },
         1);
     /// 2.3 query, parameter binding
     clientPtr->execSqlAsync(
         "select * from users where user_id = ? and user_name = ?",
-        [](const Result &r) {
-            testOutput(r.size() == 1,
-                       "mysql - DbClient asynchronous interface(4)");
-        },
-        [](const DrogonDbException &e) {
-            std::cerr << e.base().what() << std::endl;
-            testOutput(false, "mysql - DbClient asynchronous interface(4)");
+        [TEST_CTX](const Result &r) { MANDATE(r.size() == 1); },
+        [TEST_CTX](const DrogonDbException &e) {
+            FAULT("mysql - DbClient asynchronous interface(4) what():",
+                  e.base().what());
         },
         "pg1",
         "postgresql1");
     /// 2.4 delete
     clientPtr->execSqlAsync(
         "delete from users where user_id = ? and user_name = ?",
-        [](const Result &r) {
-            testOutput(r.affectedRows() == 1,
-                       "mysql - DbClient asynchronous interface(5)");
-        },
-        [](const DrogonDbException &e) {
-            std::cerr << e.base().what() << std::endl;
-            testOutput(false, "mysql - DbClient asynchronous interface(5)");
+        [TEST_CTX](const Result &r) { MANDATE(r.affectedRows() == 1); },
+        [TEST_CTX](const DrogonDbException &e) {
+            FAULT("mysql - DbClient asynchronous interface(5) what():",
+                  e.base().what());
         },
         "pg1",
         "postgresql1");
@@ -968,13 +1750,10 @@ void doMysqlTest(const drogon::orm::DbClientPtr &clientPtr)
     clientPtr->execSqlAsync(
         "update users set user_id = ?, user_name = ? where user_id "
         "= ? and user_name = ?",
-        [](const Result &r) {
-            testOutput(r.affectedRows() == 1,
-                       "mysql - DbClient asynchronous interface(6)");
-        },
-        [](const DrogonDbException &e) {
-            std::cerr << e.base().what() << std::endl;
-            testOutput(false, "mysql - DbClient asynchronous interface(6)");
+        [TEST_CTX](const Result &r) { MANDATE(r.affectedRows() == 1); },
+        [TEST_CTX](const DrogonDbException &e) {
+            FAULT("mysql - DbClient asynchronous interface(6) what():",
+                  e.base().what());
         },
         "pg1",
         "postgresql1",
@@ -983,12 +1762,10 @@ void doMysqlTest(const drogon::orm::DbClientPtr &clientPtr)
     /// 2.6 truncate
     clientPtr->execSqlAsync(
         "truncate table users",
-        [](const Result &r) {
-            testOutput(true, "mysql - DbClient asynchronous interface(7)");
-        },
-        [](const DrogonDbException &e) {
-            std::cerr << "error:" << e.base().what() << std::endl;
-            testOutput(false, "mysql - DbClient asynchronous interface(7)");
+        [TEST_CTX](const Result &r) { SUCCESS(); },
+        [TEST_CTX](const DrogonDbException &e) {
+            FAULT("mysql - DbClient asynchronous interface(7) what():",
+                  e.base().what());
         });
 
     /// Test synchronous method
@@ -1003,13 +1780,12 @@ void doMysqlTest(const drogon::orm::DbClientPtr &clientPtr)
             "123",
             "default");
         // std::cout << r.insertId();
-        testOutput(r.insertId() == 1,
-                   "mysql - DbClient synchronous interface(0)");
+        MANDATE(r.insertId() == 1);
     }
     catch (const DrogonDbException &e)
     {
-        std::cerr << e.base().what() << std::endl;
-        testOutput(false, "mysql - DbClient asynchronous interface(0)");
+        FAULT("mysql - DbClient asynchronous interface(0) what():",
+              e.base().what());
     }
     /// 3.2 insert
     try
@@ -1021,13 +1797,12 @@ void doMysqlTest(const drogon::orm::DbClientPtr &clientPtr)
             "postgresql1",
             "123",
             "default");
-        testOutput(r.affectedRows() == 1,
-                   "mysql - DbClient synchronous interface(1)");
+        MANDATE(r.affectedRows() == 1);
     }
     catch (const DrogonDbException &e)
     {
-        std::cerr << e.base().what() << std::endl;
-        testOutput(false, "mysql - DbClient asynchronous interface(1)");
+        FAULT("mysql - DbClient asynchronous interface(1) what():",
+              e.base().what());
     }
     /// 3.3 query
     try
@@ -1036,12 +1811,12 @@ void doMysqlTest(const drogon::orm::DbClientPtr &clientPtr)
             "select * from users where user_id=? and user_name=?",
             "pg1",
             "postgresql1");
-        testOutput(r.size() == 1, "mysql - DbClient synchronous interface(2)");
+        MANDATE(r.size() == 1);
     }
     catch (const DrogonDbException &e)
     {
-        std::cerr << e.base().what() << std::endl;
-        testOutput(false, "mysql - DbClient asynchronous interface(2)");
+        FAULT("mysql - DbClient asynchronous interface(2) what():",
+              e.base().what());
     }
     /// 3.4 query for none
     try
@@ -1050,12 +1825,12 @@ void doMysqlTest(const drogon::orm::DbClientPtr &clientPtr)
             "select * from users where user_id=? and user_name=?",
             "pg111",
             "postgresql1");
-        testOutput(r.size() == 0, "mysql - DbClient synchronous interface(3)");
+        MANDATE(r.size() == 0);
     }
     catch (const DrogonDbException &e)
     {
-        std::cerr << e.base().what() << std::endl;
-        testOutput(false, "mysql - DbClient asynchronous interface(3)");
+        FAULT("mysql - DbClient asynchronous interface(3) what():",
+              e.base().what());
     }
     /// 3.5 bad sql
     try
@@ -1064,23 +1839,21 @@ void doMysqlTest(const drogon::orm::DbClientPtr &clientPtr)
             "select * from users where user_id=? and user_name='1234'",
             "pg111",
             "postgresql1");
-        testOutput(r.size() == 0, "mysql - DbClient synchronous interface(4)");
+        MANDATE(r.size() == 0);
     }
     catch (const DrogonDbException &e)
     {
-        // std::cerr << e.base().what() << std::endl;
-        testOutput(true, "mysql - DbClient asynchronous interface(4)");
+        SUCCESS();
     }
     /// 3.6 truncate
     try
     {
         auto r = clientPtr->execSqlSync("truncate table users");
-        testOutput(true, "mysql - DbClient synchronous interface(5)");
+        SUCCESS();
     }
     catch (const DrogonDbException &e)
     {
-        // std::cerr << e.base().what() << std::endl;
-        testOutput(true, "mysql - DbClient asynchronous interface(5)");
+        SUCCESS();
     }
     /// Test future interface
     /// 4.1 insert
@@ -1094,12 +1867,11 @@ void doMysqlTest(const drogon::orm::DbClientPtr &clientPtr)
     try
     {
         auto r = f.get();
-        testOutput(r.insertId() == 1, "mysql - DbClient future interface(0)");
+        MANDATE(r.insertId() == 1);
     }
     catch (const DrogonDbException &e)
     {
-        std::cerr << e.base().what() << std::endl;
-        testOutput(false, "mysql - DbClient future interface(0)");
+        FAULT("mysql - DbClient future interface(0) what():", e.base().what());
     }
     /// 4.2 insert
     f = clientPtr->execSqlAsyncFuture(
@@ -1112,13 +1884,11 @@ void doMysqlTest(const drogon::orm::DbClientPtr &clientPtr)
     try
     {
         auto r = f.get();
-        testOutput(r.affectedRows() == 1,
-                   "mysql - DbClient future interface(1)");
+        MANDATE(r.affectedRows() == 1);
     }
     catch (const DrogonDbException &e)
     {
-        std::cerr << e.base().what() << std::endl;
-        testOutput(false, "mysql - DbClient future interface(1)");
+        FAULT("mysql - DbClient future interface(1) what():", e.base().what());
     }
     /// 4.3 query
     f = clientPtr->execSqlAsyncFuture(
@@ -1128,12 +1898,11 @@ void doMysqlTest(const drogon::orm::DbClientPtr &clientPtr)
     try
     {
         auto r = f.get();
-        testOutput(r.size() == 1, "mysql - DbClient future interface(2)");
+        MANDATE(r.size() == 1);
     }
     catch (const DrogonDbException &e)
     {
-        std::cerr << e.base().what() << std::endl;
-        testOutput(false, "mysql - DbClient future interface(2)");
+        FAULT("mysql - DbClient future interface(2) what():", e.base().what());
     }
     /// 4.4 query for none
     f = clientPtr->execSqlAsyncFuture(
@@ -1143,12 +1912,11 @@ void doMysqlTest(const drogon::orm::DbClientPtr &clientPtr)
     try
     {
         auto r = f.get();
-        testOutput(r.size() == 0, "mysql - DbClient future interface(3)");
+        MANDATE(r.size() == 0);
     }
     catch (const DrogonDbException &e)
     {
-        std::cerr << e.base().what() << std::endl;
-        testOutput(false, "mysql - DbClient future interface(3)");
+        FAULT("mysql - DbClient future interface(3) what():", e.base().what());
     }
     /// 4.5 bad sql
     f = clientPtr->execSqlAsyncFuture(
@@ -1158,24 +1926,22 @@ void doMysqlTest(const drogon::orm::DbClientPtr &clientPtr)
     try
     {
         auto r = f.get();
-        testOutput(r.size() == 0, "mysql - DbClient future interface(4)");
+        MANDATE(r.size() == 0);
     }
     catch (const DrogonDbException &e)
     {
-        // std::cerr << e.base().what() << std::endl;
-        testOutput(true, "mysql - DbClient future interface(4)");
+        SUCCESS();
     }
     /// 4.6 truncate
     f = clientPtr->execSqlAsyncFuture("truncate table users");
     try
     {
         auto r = f.get();
-        testOutput(true, "mysql - DbClient future interface(5)");
+        SUCCESS();
     }
     catch (const DrogonDbException &e)
     {
-        // std::cerr << e.base().what() << std::endl;
-        testOutput(false, "mysql - DbClient future interface(5)");
+        FAULT("mysql - DbClient future interface(5) what():", e.base().what());
     }
 
     /// 5 Test Result and Row exception throwing
@@ -1187,12 +1953,11 @@ void doMysqlTest(const drogon::orm::DbClientPtr &clientPtr)
             "pg111",
             "postgresql1");
         r.at(0);
-        testOutput(false, "mysql - Result throwing exceptions(0)");
+        FAULT("mysql - Result throwing exceptions(0)");
     }
     catch (const DrogonDbException &e)
     {
-        std::cerr << e.base().what() << std::endl;
-        testOutput(true, "mysql -  Result throwing exceptions(0)");
+        SUCCESS();
     }
     // 5.2 insert one just for setup
     try
@@ -1204,12 +1969,11 @@ void doMysqlTest(const drogon::orm::DbClientPtr &clientPtr)
             "postgresql",
             "123",
             "default");
-        testOutput(r.insertId() == 1, "mysql - Row throwing exceptions(0)");
+        MANDATE(r.insertId() == 1);
     }
     catch (const DrogonDbException &e)
     {
-        std::cerr << e.base().what() << std::endl;
-        testOutput(false, "mysql - Row throwing exceptions(0)");
+        FAULT("mysql - Row throwing exceptions(0) what():", e.base().what());
     }
 
     // 5.3 try to access nonexistent column by name
@@ -1218,12 +1982,11 @@ void doMysqlTest(const drogon::orm::DbClientPtr &clientPtr)
         auto r = clientPtr->execSqlSync("select * from users");
         auto row = r.at(0);
         row["imaginary_column"];
-        testOutput(false, "mysql - Row throwing exceptions(1)");
+        FAULT("mysql - Row throwing exceptions(1)");
     }
     catch (const DrogonDbException &e)
     {
-        std::cerr << e.base().what() << std::endl;
-        testOutput(true, "mysql -  Row throwing exceptions(1)");
+        SUCCESS();
     }
 
     // 5.4 try to access nonexistent column by index
@@ -1232,30 +1995,28 @@ void doMysqlTest(const drogon::orm::DbClientPtr &clientPtr)
         auto r = clientPtr->execSqlSync("select * from users");
         auto row = r.at(0);
         row.at(420);
-        testOutput(false, "mysql - Row throwing exceptions(2)");
+        FAULT("mysql - Row throwing exceptions(2)");
     }
     catch (const DrogonDbException &e)
     {
-        std::cerr << e.base().what() << std::endl;
-        testOutput(true, "mysql -  Row throwing exceptions(2)");
+        SUCCESS();
     }
 
     // 5.5 cleanup
     try
     {
         auto r = clientPtr->execSqlSync("truncate table users");
-        testOutput(true, "mysql - Row throwing exceptions(3)");
+        SUCCESS();
     }
     catch (const DrogonDbException &e)
     {
-        std::cerr << e.base().what() << std::endl;
-        testOutput(false, "mysql -  Row throwing exceptions(3)");
+        FAULT("mysql -  Row throwing exceptions(3) what():", e.base().what());
     }
 
     /// Test ORM mapper
     /// 6.1 insert, noneblocking
     using namespace drogon_model::drogonTestMysql;
-    drogon::orm::Mapper<Users> mapper(clientPtr);
+    Mapper<Users> mapper(clientPtr);
     Users user;
     user.setUserId("pg");
     user.setUserName("postgres");
@@ -1263,202 +2024,850 @@ void doMysqlTest(const drogon::orm::DbClientPtr &clientPtr)
     user.setOrgName("default");
     mapper.insert(
         user,
-        [](Users ret) {
-            testOutput(ret.getPrimaryKey() == 1,
-                       "mysql - ORM mapper asynchronous interface(0)");
-        },
-        [](const DrogonDbException &e) {
-            std::cerr << e.base().what() << std::endl;
-            testOutput(false, "mysql - ORM mapper asynchronous interface(0)");
+        [TEST_CTX](Users ret) { MANDATE(ret.getPrimaryKey() == 1); },
+        [TEST_CTX](const DrogonDbException &e) {
+            FAULT("mysql - ORM mapper asynchronous interface(0) what():",
+                  e.base().what());
         });
     /// 6.1.5 count
     mapper.count(
-        drogon::orm::Criteria(Users::Cols::_id, CompareOperator::EQ, 1),
-        [](const size_t c) {
-            testOutput(c == 1, "mysql - ORM mapper asynchronous interface(1)");
-        },
-        [](const DrogonDbException &e) {
-            std::cerr << e.base().what() << std::endl;
-            testOutput(false, "mysql - ORM mapper asynchronous interface(1)");
+        Criteria(Users::Cols::_id, CompareOperator::EQ, 1),
+        [TEST_CTX](const size_t c) { MANDATE(c == 1); },
+        [TEST_CTX](const DrogonDbException &e) {
+            FAULT("mysql - ORM mapper asynchronous interface(1) what():",
+                  e.base().what());
         });
     /// 6.2 insert
     user.setUserId("pg1");
     user.setUserName("postgres1");
     mapper.insert(
         user,
-        [](Users ret) {
-            testOutput(ret.getPrimaryKey() == 2,
-                       "mysql - ORM mapper asynchronous interface(2)");
-        },
-        [](const DrogonDbException &e) {
-            std::cerr << e.base().what() << std::endl;
-            testOutput(false, "mysql - ORM mapper asynchronous interface(2)");
+        [TEST_CTX](Users ret) { MANDATE(ret.getPrimaryKey() == 2); },
+        [TEST_CTX](const DrogonDbException &e) {
+            FAULT("mysql - ORM mapper asynchronous interface(2) what():",
+                  e.base().what());
         });
     /// 6.3 select where in
     mapper.findBy(
         Criteria(Users::Cols::_id,
                  CompareOperator::In,
                  std::vector<int32_t>{2, 200}),
-        [](std::vector<Users> users) {
-            testOutput(users.size() == 1,
-                       "mysql - ORM mapper asynchronous interface(3)");
-        },
-        [](const DrogonDbException &e) {
-            std::cerr << e.base().what() << std::endl;
-            testOutput(false, "mysql - ORM mapper asynchronous interface(3)");
+        [TEST_CTX](std::vector<Users> users) { MANDATE(users.size() == 1); },
+        [TEST_CTX](const DrogonDbException &e) {
+            FAULT("mysql - ORM mapper asynchronous interface(3) what():",
+                  e.base().what());
         });
-
+    /// 6.3.6 custom where query
+    mapper.findBy(
+        Criteria("id between $? and $?"_sql, 2, 200),
+        [TEST_CTX](std::vector<Users> users) { MANDATE(users.size() == 1); },
+        [TEST_CTX](const DrogonDbException &e) {
+            FAULT("mysql - ORM mapper asynchronous interface(4) what():",
+                  e.base().what());
+        });
     /// 6.4 find by primary key. blocking
     try
     {
         auto user = mapper.findByPrimaryKey(1);
-        testOutput(true, "mysql - ORM mapper synchronous interface(0)");
+        SUCCESS();
         Users newUser;
         newUser.setId(user.getValueOfId());
         newUser.setSalt("xxx");
         auto c = mapper.update(newUser);
-        testOutput(c == 1, "mysql - ORM mapper synchronous interface(1)");
+        MANDATE(c == 1);
     }
     catch (const DrogonDbException &e)
     {
-        std::cerr << e.base().what() << std::endl;
-        testOutput(false, "mysql - ORM mapper synchronous interface(0)");
+        FAULT("mysql - ORM mapper synchronous interface(0) what():",
+              e.base().what());
+    }
+    /// 6.5 update by criteria. blocking
+    try
+    {
+        auto user = mapper.findByPrimaryKey(2);
+        SUCCESS();
+        Users newUser;
+        newUser.setId(user.getValueOfId());
+        newUser.setSalt("xxx");
+        newUser.setUserName(user.getValueOfUserName());
+        auto c = mapper.update(newUser);
+        MANDATE(c == 1);
+        c = mapper.updateBy({Users::Cols::_avatar_id, Users::Cols::_salt},
+                            Criteria(Users::Cols::_user_id,
+                                     CompareOperator::EQ,
+                                     "pg"),
+                            "avatar of pg",
+                            "salt of pg");
+        MANDATE(c == 1);
+        c = mapper.updateBy({Users::Cols::_avatar_id, Users::Cols::_salt},
+                            Criteria(Users::Cols::_user_id,
+                                     CompareOperator::EQ,
+                                     "none"),
+                            "avatar of none",
+                            "salt of none");
+        MANDATE(c == 0);
+    }
+    catch (const DrogonDbException &e)
+    {
+        FAULT("mysql - ORM mapper synchronous interface(1) what():",
+              e.base().what());
+    }
+
+    /// Test ORM QueryBuilder
+    /// execSync
+    try
+    {
+        const std::vector<Users> users =
+            QueryBuilder<Users>{}.from("users").selectAll().execSync(clientPtr);
+        MANDATE(users.size() == 2);
+    }
+    catch (const DrogonDbException &e)
+    {
+        FAULT("mysql - ORM QueryBuilder synchronous interface(0) what():",
+              e.base().what());
+    }
+    try
+    {
+        const Result users =
+            QueryBuilder<Users>{}.from("users").select("id").execSync(
+                clientPtr);
+        MANDATE(users.size() == 2);
+        for (const Row &u : users)
+        {
+            MANDATE(!u["id"].isNull());
+        }
+    }
+    catch (const DrogonDbException &e)
+    {
+        FAULT("mysql - ORM QueryBuilder synchronous interface(1) what():",
+              e.base().what());
+    }
+    try
+    {
+        const Users user = QueryBuilder<Users>{}
+                               .from("users")
+                               .selectAll()
+                               .eq("id", "2")
+                               .limit(1)
+                               .single()
+                               .order("id", false)
+                               .execSync(clientPtr);
+        MANDATE(user.getPrimaryKey() == 2);
+    }
+    catch (const DrogonDbException &e)
+    {
+        FAULT("mysql - ORM QueryBuilder synchronous interface(2) what():",
+              e.base().what());
+    }
+    try
+    {
+        const Row user = QueryBuilder<Users>{}
+                             .from("users")
+                             .select("id")
+                             .limit(1)
+                             .single()
+                             .order("id", false)
+                             .execSync(clientPtr);
+        MANDATE(user["id"].as<int32_t>() == 2);
+    }
+    catch (const DrogonDbException &e)
+    {
+        FAULT("mysql - ORM QueryBuilder synchronous interface(3) what():",
+              e.base().what());
+    }
+
+    /// execAsyncFuture
+    {
+        std::future<std::vector<Users>> users =
+            QueryBuilder<Users>{}.from("users").selectAll().execAsyncFuture(
+                clientPtr);
+        try
+        {
+            const std::vector<Users> r = users.get();
+            MANDATE(r.size() == 2);
+        }
+        catch (const DrogonDbException &e)
+        {
+            FAULT(
+                "mysql - ORM QueryBuilder asynchronous interface(0) "
+                "what():",
+                e.base().what());
+        }
+    }
+    {
+        std::future<Result> users =
+            QueryBuilder<Users>{}.from("users").select("id").execAsyncFuture(
+                clientPtr);
+        try
+        {
+            const Result r = users.get();
+            MANDATE(r.size() == 2);
+            for (const Row &u : r)
+            {
+                MANDATE(!u["id"].isNull());
+            }
+        }
+        catch (const DrogonDbException &e)
+        {
+            FAULT(
+                "mysql - ORM QueryBuilder asynchronous interface(1) "
+                "what():",
+                e.base().what());
+        }
+    }
+    {
+        std::future<Users> user = QueryBuilder<Users>{}
+                                      .from("users")
+                                      .selectAll()
+                                      .eq("id", "2")
+                                      .limit(1)
+                                      .single()
+                                      .order("id", false)
+                                      .execAsyncFuture(clientPtr);
+        try
+        {
+            const Users r = user.get();
+            MANDATE(r.getPrimaryKey() == 2);
+        }
+        catch (const DrogonDbException &e)
+        {
+            FAULT(
+                "mysql - ORM QueryBuilder asynchronous interface(2) "
+                "what():",
+                e.base().what());
+        }
+    }
+    {
+        std::future<Row> users = QueryBuilder<Users>{}
+                                     .from("users")
+                                     .select("id")
+                                     .limit(1)
+                                     .single()
+                                     .order("id", false)
+                                     .execAsyncFuture(clientPtr);
+        try
+        {
+            const Row r = users.get();
+            MANDATE(r["id"].as<int32_t>() == 2);
+        }
+        catch (const DrogonDbException &e)
+        {
+            FAULT(
+                "mysql - ORM QueryBuilder asynchronous interface(3) "
+                "what():",
+                e.base().what());
+        }
+    }
+
+#ifdef __cpp_impl_coroutine
+    auto coro_test = [clientPtr, TEST_CTX]() -> drogon::Task<> {
+        /// 7 Test coroutines.
+        /// This is by no means comprehensive. But coroutine API is essentially
+        /// a wrapper around callbacks. The purpose is to test the interface
+        /// works 7.1 Basic queries
+        try
+        {
+            auto result =
+                co_await clientPtr->execSqlCoro("select * from users;");
+            MANDATE(result.size() != 0);
+        }
+        catch (const DrogonDbException &e)
+        {
+            FAULT("mysql - DbClient coroutine interface(0) what():",
+                  e.base().what());
+        }
+        /// 7.2 Parameter binding
+        try
+        {
+            auto result = co_await clientPtr->execSqlCoro(
+                "select * from users where 1=?;", 1);
+            MANDATE(result.size() != 0);
+        }
+        catch (const DrogonDbException &e)
+        {
+            FAULT("mysql - DbClient coroutine interface(1) what():",
+                  e.base().what());
+        }
+    };
+    drogon::sync_wait(coro_test());
+
+#endif
+
+    /// 8 Test ORM related query
+    /// 8.1 async
+    /// 8.1.1 one-to-one
+    Mapper<Wallets> walletsMapper(clientPtr);
+
+    /// prepare
+    {
+        Wallets wallet;
+        wallet.setUserId("pg");
+        wallet.setAmount("2000.00");
+        try
+        {
+            walletsMapper.insert(wallet);
+            SUCCESS();
+        }
+        catch (const DrogonDbException &e)
+        {
+            FAULT("mysql - ORM mapper related prepare(0) what():",
+                  e.base().what());
+        }
+    }
+
+    /// users to wallets
+    {
+        Users user;
+        user.setUserId("pg");
+        user.getWallet(
+            clientPtr,
+            [TEST_CTX](Wallets r) {
+                MANDATE(r.getValueOfAmount() == "2000.00");
+            },
+            [TEST_CTX](const DrogonDbException &e) {
+                FAULT("mysql - ORM mapper related async one-to-one(0) what():",
+                      e.base().what());
+            });
+    }
+    /// users to wallets without data
+    {
+        Users user;
+        user.setUserId("pg1");
+        user.getWallet(
+            clientPtr,
+            [TEST_CTX](Wallets w) {
+                FAULT("mysql - ORM mapper related async one-to-one(1)");
+            },
+            [TEST_CTX](const DrogonDbException &e) { SUCCESS(); });
+    }
+
+    /// 8.1.2 one-to-many
+    Mapper<Category> categoryMapper(clientPtr);
+    Mapper<Blog> blogMapper(clientPtr);
+
+    /// prepare
+    {
+        Category category;
+        category.setName("category1");
+        try
+        {
+            categoryMapper.insert(category);
+            SUCCESS();
+        }
+        catch (const DrogonDbException &e)
+        {
+            FAULT("mysql - ORM mapper related prepare(1) what():",
+                  e.base().what());
+        }
+        category.setName("category2");
+        try
+        {
+            categoryMapper.insert(category);
+            SUCCESS();
+        }
+        catch (const DrogonDbException &e)
+        {
+            FAULT("mysql - ORM mapper related prepare(2) what():",
+                  e.base().what());
+        }
+        Blog blog;
+        blog.setTitle("title1");
+        blog.setCategoryId(1);
+        try
+        {
+            blogMapper.insert(blog);
+            SUCCESS();
+        }
+        catch (const DrogonDbException &e)
+        {
+            FAULT("mysql - ORM mapper related prepare(3) what():",
+                  e.base().what());
+        }
+        blog.setTitle("title2");
+        blog.setCategoryId(1);
+        try
+        {
+            blogMapper.insert(blog);
+            SUCCESS();
+        }
+        catch (const DrogonDbException &e)
+        {
+            FAULT("mysql - ORM mapper related prepare(4) what():",
+                  e.base().what());
+        }
+        blog.setTitle("title3");
+        blog.setCategoryId(3);
+        try
+        {
+            blogMapper.insert(blog);
+            SUCCESS();
+        }
+        catch (const DrogonDbException &e)
+        {
+            FAULT("mysql - ORM mapper related prepare(5) what():",
+                  e.base().what());
+        }
+    }
+
+    /// categories to blogs
+    {
+        Category category;
+        category.setId(1);
+        category.getBlogs(
+            clientPtr,
+            [TEST_CTX](std::vector<Blog> r) { MANDATE(r.size() == 2); },
+            [TEST_CTX](const DrogonDbException &e) {
+                FAULT("mysql - ORM mapper related async one-to-many(0) what():",
+                      e.base().what());
+            });
+    }
+    /// categories to blogs without data
+    {
+        Category category;
+        category.setId(2);
+        category.getBlogs(
+            clientPtr,
+            [TEST_CTX](std::vector<Blog> r) { MANDATE(r.size() == 0); },
+            [TEST_CTX](const DrogonDbException &e) {
+                FAULT("mysql - ORM mapper related async one-to-many(1) what():",
+                      e.base().what());
+            });
+    }
+    /// blogs to categories
+    {
+        Blog blog;
+        blog.setCategoryId(1);
+        blog.getCategory(
+            clientPtr,
+            [TEST_CTX](Category r) {
+                MANDATE(r.getValueOfName() == "category1");
+            },
+            [TEST_CTX](const DrogonDbException &e) {
+                FAULT("mysql - ORM mapper related async one-to-many(2) what():",
+                      e.base().what());
+            });
+    }
+    /// blogs to categories without data
+    {
+        Blog blog;
+        blog.setCategoryId(3);
+        blog.getCategory(
+            clientPtr,
+            [TEST_CTX](Category r) {
+                FAULT("mysql - ORM mapper related async one-to-many(3)");
+            },
+            [TEST_CTX](const DrogonDbException &e) { SUCCESS(); });
+    }
+
+    /// 8.1.3 many-to-many
+    Mapper<BlogTag> blogTagMapper(clientPtr);
+    Mapper<Tag> tagMapper(clientPtr);
+
+    /// prepare
+    {
+        BlogTag blogTag;
+        blogTag.setBlogId(1);
+        blogTag.setTagId(1);
+        try
+        {
+            blogTagMapper.insert(blogTag);
+            SUCCESS();
+        }
+        catch (const DrogonDbException &e)
+        {
+            FAULT("mysql - ORM mapper related prepare(6) what():",
+                  e.base().what());
+        }
+        blogTag.setBlogId(1);
+        blogTag.setTagId(2);
+        try
+        {
+            blogTagMapper.insert(blogTag);
+            SUCCESS();
+        }
+        catch (const DrogonDbException &e)
+        {
+            FAULT("mysql - ORM mapper related prepare(7) what():",
+                  e.base().what());
+        }
+        Tag tag;
+        tag.setName("tag1");
+        try
+        {
+            tagMapper.insert(tag);
+            SUCCESS();
+        }
+        catch (const DrogonDbException &e)
+        {
+            FAULT("mysql - ORM mapper related prepare(8) what():",
+                  e.base().what());
+        }
+        tag.setName("tag2");
+        try
+        {
+            tagMapper.insert(tag);
+            SUCCESS();
+        }
+        catch (const DrogonDbException &e)
+        {
+            FAULT("mysql - ORM mapper related prepare(9) what():",
+                  e.base().what());
+        }
+    }
+
+    /// blogs to tags
+    {
+        Blog blog;
+        blog.setId(1);
+        blog.getTags(
+            clientPtr,
+            [TEST_CTX](std::vector<std::pair<Tag, BlogTag>> r) {
+                MANDATE(r.size() == 2);
+            },
+            [TEST_CTX](const DrogonDbException &e) {
+                FAULT(
+                    "mysql - ORM mapper related async many-to-many(0) what():",
+                    e.base().what());
+            });
+    }
+
+    /// 8.2 async
+    /// 8.2.1 one-to-one
+    /// users to wallets
+    {
+        Users user;
+        user.setUserId("pg");
+        try
+        {
+            auto r = user.getWallet(clientPtr);
+            MANDATE(r.getValueOfAmount() == "2000.00");
+        }
+        catch (const DrogonDbException &e)
+        {
+            FAULT("mysql - ORM mapper related sync one-to-one(0) what():",
+                  e.base().what());
+        }
+    }
+    /// users to wallets without data
+    {
+        Users user;
+        user.setUserId("pg1");
+        try
+        {
+            auto r = user.getWallet(clientPtr);
+            FAULT("mysql - ORM mapper related sync one-to-one(1)");
+        }
+        catch (const DrogonDbException &e)
+        {
+            SUCCESS();
+        }
+    }
+
+    /// 8.2.2 one-to-many
+    /// categories to blogs
+    {
+        Category category;
+        category.setId(1);
+        try
+        {
+            auto r = category.getBlogs(clientPtr);
+            MANDATE(r.size() == 2);
+        }
+        catch (const DrogonDbException &e)
+        {
+            FAULT("mysql - ORM mapper related sync one-to-many(0) what():",
+                  e.base().what());
+        }
+    }
+    /// categories to blogs without data
+    {
+        Category category;
+        category.setId(2);
+        try
+        {
+            auto r = category.getBlogs(clientPtr);
+            MANDATE(r.size() == 0);
+        }
+        catch (const DrogonDbException &e)
+        {
+            FAULT("mysql - ORM mapper related sync one-to-many(1) what():",
+                  e.base().what());
+        }
+    }
+    /// blogs to categories
+    {
+        Blog blog;
+        blog.setCategoryId(1);
+        try
+        {
+            auto r = blog.getCategory(clientPtr);
+            MANDATE(r.getValueOfName() == "category1");
+        }
+        catch (const DrogonDbException &e)
+        {
+            FAULT("mysql - ORM mapper related sync one-to-many(2) what():",
+                  e.base().what());
+        }
+    }
+    /// blogs to categories without data
+    {
+        Blog blog;
+        blog.setCategoryId(3);
+        try
+        {
+            auto r = blog.getCategory(clientPtr);
+            FAULT("mysql - ORM mapper related sync one-to-many(3)");
+        }
+        catch (const DrogonDbException &e)
+        {
+            SUCCESS();
+        }
+    }
+
+    /// 8.2.3 many-to-many
+    /// blogs to tags
+    {
+        Blog blog;
+        blog.setId(1);
+        try
+        {
+            auto r = blog.getTags(clientPtr);
+            MANDATE(r.size() == 2);
+        }
+        catch (const DrogonDbException &e)
+        {
+            FAULT("mysql - ORM mapper related sync many-to-many(0) what():",
+                  e.base().what());
+        }
     }
 }
+#endif
 
-void doSqliteTest(const drogon::orm::DbClientPtr &clientPtr)
+#if USE_SQLITE3
+DbClientPtr sqlite3Client;
+
+DROGON_TEST(SQLite3Test)
 {
+    auto &clientPtr = sqlite3Client;
+    REQUIRE(clientPtr != nullptr);
+
     // Prepare the test environment
-    *clientPtr << "DROP TABLE IF EXISTS users" >> [](const Result &r) {
-        testOutput(true, "sqlite3 - Prepare the test environment(0)");
-    } >> [](const DrogonDbException &e) {
-        std::cerr << e.base().what() << std::endl;
-        testOutput(false, "sqlite3 - Prepare the test environment(0)");
+    *clientPtr << "DROP TABLE IF EXISTS users" >> [TEST_CTX,
+                                                   clientPtr](const Result &r) {
+        SUCCESS();
+        clientPtr->execSqlAsync(
+            "select 1 as result",
+            [TEST_CTX](const Result &r) { MANDATE(r.size() == 1); },
+            expFunction);
+    } >> [TEST_CTX](const DrogonDbException &e) {
+        FAULT("sqlite3 - Prepare the test environment(0):  what():",
+              e.base().what());
     };
-    *clientPtr << "CREATE TABLE users \
-        (\
-            id INTEGER PRIMARY KEY autoincrement,\
-            user_id varchar(32),\
-            user_name varchar(64),\
-            password varchar(64),\
-            org_name varchar(20),\
-            signature varchar(50),\
-            avatar_id varchar(32),\
-            salt character varchar(20),\
-            admin boolean DEFAULT false,\
-            CONSTRAINT user_id_org UNIQUE(user_id, org_name)\
-        )" >>
-        [](const Result &r) {
-            testOutput(true, "sqlite3 - Prepare the test environment(1)");
-        } >>
-        [](const DrogonDbException &e) {
-            std::cerr << e.base().what() << std::endl;
-            testOutput(false, "sqlite3 - Prepare the test environment(1)");
+
+    *clientPtr << "CREATE TABLE users "
+                  "("
+                  "    id INTEGER PRIMARY KEY autoincrement,"
+                  "    user_id varchar(32),"
+                  "    user_name varchar(64),"
+                  "    password varchar(64),"
+                  "    org_name varchar(20),"
+                  "    signature varchar(50),"
+                  "    avatar_id varchar(32),"
+                  "    salt character varchar(20),"
+                  "    admin boolean DEFAULT false,"
+                  "    create_time datetime,"
+                  "    CONSTRAINT user_id_org UNIQUE(user_id, org_name)"
+                  ")" >>
+        [TEST_CTX](const Result &r) { SUCCESS(); } >>
+        [TEST_CTX](const DrogonDbException &e) {
+            FAULT("sqlite3 - Prepare the test environment(1) what():",
+                  e.base().what());
+        };
+    // wallets table one-to-one with users table
+    *clientPtr << "DROP TABLE IF EXISTS wallets" >>
+        [TEST_CTX](const Result &r) { SUCCESS(); } >>
+        [TEST_CTX](const DrogonDbException &e) {
+            FAULT("sqlite3 - Prepare the test environment(2) what():",
+                  e.base().what());
+        };
+    *clientPtr << "CREATE TABLE `wallets` ("
+                  "    `id` INTEGER PRIMARY KEY autoincrement,"
+                  "    `user_id` varchar(32) DEFAULT NULL,"
+                  "    `amount` decimal(16,2) DEFAULT NULL"
+                  ")" >>
+        [TEST_CTX](const Result &r) { SUCCESS(); } >>
+        [TEST_CTX](const DrogonDbException &e) {
+            FAULT("sqlite3 - Prepare the test environment(3) what():",
+                  e.base().what());
+        };
+    // blog
+    *clientPtr << "DROP TABLE IF EXISTS blog" >> [TEST_CTX](const Result &r) {
+        SUCCESS();
+    } >> [TEST_CTX](const DrogonDbException &e) {
+        FAULT("sqlite3 - Prepare the test environment(4) what():",
+              e.base().what());
+    };
+    *clientPtr << "CREATE TABLE `blog` ("
+                  "    `id` INTEGER PRIMARY KEY autoincrement,"
+                  "    `title` varchar(30) DEFAULT NULL,"
+                  "    `category_id` INTEGER DEFAULT NULL"
+                  ")" >>
+        [TEST_CTX](const Result &r) { SUCCESS(); } >>
+        [TEST_CTX](const DrogonDbException &e) {
+            FAULT("sqlite3 - Prepare the test environment(5) what():",
+                  e.base().what());
+        };
+    // category table one-to-many with blog table
+    *clientPtr << "DROP TABLE IF EXISTS category" >>
+        [TEST_CTX](const Result &r) { SUCCESS(); } >>
+        [TEST_CTX](const DrogonDbException &e) {
+            FAULT("sqlite3 - Prepare the test environment(6) what():",
+                  e.base().what());
+        };
+    *clientPtr << "CREATE TABLE `category` ("
+                  "    `id` INTEGER PRIMARY KEY autoincrement,"
+                  "    `name` varchar(30) DEFAULT NULL"
+                  ")" >>
+        [TEST_CTX](const Result &r) { SUCCESS(); } >>
+        [TEST_CTX](const DrogonDbException &e) {
+            FAULT("sqlite3 - Prepare the test environment(7) what():",
+                  e.base().what());
+        };
+    // tag table many-to-many with blog table
+    *clientPtr << "DROP TABLE IF EXISTS tag" >> [TEST_CTX](const Result &r) {
+        SUCCESS();
+    } >> [TEST_CTX](const DrogonDbException &e) {
+        FAULT("sqlite3 - Prepare the test environment(8) what():",
+              e.base().what());
+    };
+    *clientPtr << "CREATE TABLE `tag` ("
+                  "    `id` INTEGER PRIMARY KEY autoincrement,"
+                  "    `name` varchar(30) DEFAULT NULL"
+                  ")" >>
+        [TEST_CTX](const Result &r) { SUCCESS(); } >>
+        [TEST_CTX](const DrogonDbException &e) {
+            FAULT("sqlite3 - Prepare the test environment(9) what():",
+                  e.base().what());
+        };
+    // blog_tag table is an intermediate table
+    *clientPtr << "DROP TABLE IF EXISTS blog_tag" >>
+        [TEST_CTX](const Result &r) { SUCCESS(); } >>
+        [TEST_CTX](const DrogonDbException &e) {
+            FAULT("sqlite3 - Prepare the test environment(10) what():",
+                  e.base().what());
+        };
+    *clientPtr << "CREATE TABLE `blog_tag` ("
+                  "    `blog_id` INTEGER NOT NULL,"
+                  "    `tag_id` INTEGER NOT NULL,"
+                  "    PRIMARY KEY (`blog_id`,`tag_id`)"
+                  ")" >>
+        [TEST_CTX](const Result &r) { SUCCESS(); } >>
+        [TEST_CTX](const DrogonDbException &e) {
+            FAULT("sqlite3 - Prepare the test environment(11) what():",
+                  e.base().what());
         };
     /// Test1:DbClient streaming-type interface
     /// 1.1 insert,non-blocking
-    *clientPtr << "insert into users (user_id,user_name,password,org_name) "
-                  "values(?,?,?,?)"
+    *clientPtr << "insert into users "
+                  "(user_id,user_name,password,org_name,create_time) "
+                  "values(?,?,?,?,?)"
                << "pg"
                << "postgresql"
                << "123"
-               << "default" >>
-        [](const Result &r) {
-            testOutput(r.insertId() == 1,
-                       "sqlite3 - DbClient streaming-type interface(0)");
-        } >>
-        [](const DrogonDbException &e) {
-            std::cerr << e.base().what() << std::endl;
-            testOutput(false, "sqlite3 - DbClient streaming-type interface(0)");
+               << "default" << trantor::Date::now() >>
+        [TEST_CTX](const Result &r) { MANDATE(r.insertId() == 1ULL); } >>
+        [TEST_CTX](const DrogonDbException &e) {
+            FAULT("sqlite3 - DbClient streaming-type interface(0) what():",
+                  e.base().what());
         };
     /// 1.2 insert,blocking
-    *clientPtr << "insert into users (user_id,user_name,password,org_name) "
-                  "values(?,?,?,?)"
+    *clientPtr << "insert into users "
+                  "(user_id,user_name,password,org_name,create_time) "
+                  "values(?,?,?,?,?)"
                << "pg1"
                << "postgresql1"
                << "123"
-               << "default" << Mode::Blocking >>
-        [](const Result &r) {
-            testOutput(r.insertId() == 2,
-                       "sqlite3 - DbClient streaming-type interface(1)");
-        } >>
-        [](const DrogonDbException &e) {
-            std::cerr << e.base().what() << std::endl;
-            testOutput(false, "sqlite3 - DbClient streaming-type interface(1)");
+               << "default" << trantor::Date::now() << Mode::Blocking >>
+        [TEST_CTX](const Result &r) { MANDATE(r.insertId() == 2ULL); } >>
+        [TEST_CTX](const DrogonDbException &e) {
+            FAULT("sqlite3 - DbClient streaming-type interface(1) what():",
+                  e.base().what());
         };
+    *clientPtr << "select * from users where user_id=?;"
+               << "pg1" << Mode::Blocking >>
+        [TEST_CTX](const Result &r) {
+            MANDATE(r.size() == 1);
+            MANDATE(r[0]["user_id"].as<std::string>() == "pg1");
+            using namespace drogon_model::sqlite3;
+            Users user(r[0]);
+            MANDATE(user.getValueOfUserId() == "pg1");
+            // LOG_INFO << "user:" << user.toJson().toStyledString();
+            MANDATE(trantor::Date::now().secondsSinceEpoch() -
+                        user.getValueOfCreateTime().secondsSinceEpoch() <=
+                    1);
+        } >>
+        [TEST_CTX](const DrogonDbException &e) {
+            FAULT("sqlite3 - DbClient streaming-type interface(2) what():",
+                  e.base().what());
+        };
+
     /// 1.3 query,no-blocking
     *clientPtr << "select * from users where 1 = 1" << Mode::NonBlocking >>
-        [](const Result &r) {
-            testOutput(r.size() == 2,
-                       "sqlite3 - DbClient streaming-type interface(2)");
-        } >>
-        [](const DrogonDbException &e) {
-            std::cerr << e.base().what() << std::endl;
-            testOutput(false, "sqlite3 - DbClient streaming-type interface(2)");
+        [TEST_CTX](const Result &r) { MANDATE(r.size() == 2UL); } >>
+        [TEST_CTX](const DrogonDbException &e) {
+            FAULT("sqlite3 - DbClient streaming-type interface(2) what():",
+                  e.base().what());
         };
     /// 1.4 query,blocking
     *clientPtr << "select * from users where 1 = 1" << Mode::Blocking >>
-        [](const Result &r) {
-            testOutput(r.size() == 2,
-                       "sqlite3 - DbClient streaming-type interface(3)");
-        } >>
-        [](const DrogonDbException &e) {
-            std::cerr << e.base().what() << std::endl;
-            testOutput(false, "sqlite3 - DbClient streaming-type interface(3)");
+        [TEST_CTX](const Result &r) { MANDATE(r.size() == 2UL); } >>
+        [TEST_CTX](const DrogonDbException &e) {
+            FAULT("sqlite3 - DbClient streaming-type interface(3) what():",
+                  e.base().what());
         };
     /// 1.5 query,blocking
     int count = 0;
     *clientPtr << "select user_name, user_id, id from users where 1 = 1"
                << Mode::Blocking >>
-        [&count](bool isNull,
-                 const std::string &name,
-                 std::string &&user_id,
-                 int id) {
+        [&count, TEST_CTX](bool isNull,
+                           const std::string &name,
+                           std::string &&user_id,
+                           int id) {
             if (!isNull)
                 ++count;
             else
             {
-                testOutput(count == 2,
-                           "sqlite3 - DbClient streaming-type interface(4)");
+                MANDATE(count == 2);
             }
         } >>
-        [](const DrogonDbException &e) {
-            std::cerr << e.base().what() << std::endl;
-            testOutput(false, "sqlite3 - DbClient streaming-type interface(4)");
+        [TEST_CTX](const DrogonDbException &e) {
+            FAULT("sqlite3 - DbClient streaming-type interface(4) what():",
+                  e.base().what());
         };
     /// 1.6 query, parameter binding
     *clientPtr << "select * from users where id = ?" << 1 >>
-        [](const Result &r) {
-            testOutput(r.size() == 1,
-                       "sqlite3 - DbClient streaming-type interface(5)");
-        } >>
-        [](const DrogonDbException &e) {
-            std::cerr << e.base().what() << std::endl;
-            testOutput(false, "sqlite3 - DbClient streaming-type interface(5)");
+        [TEST_CTX](const Result &r) { MANDATE(r.size() == 1UL); } >>
+        [TEST_CTX](const DrogonDbException &e) {
+            FAULT("sqlite3 - DbClient streaming-type interface(5) what():",
+                  e.base().what());
         };
     /// 1.7 query, parameter binding
     *clientPtr << "select * from users where user_id = ? and user_name = ?"
                << "pg1"
                << "postgresql1" >>
-        [](const Result &r) {
-            testOutput(r.size() == 1,
-                       "sqlite3 - DbClient streaming-type interface(6)");
-        } >>
-        [](const DrogonDbException &e) {
-            std::cerr << e.base().what() << std::endl;
-            testOutput(false, "sqlite3 - DbClient streaming-type interface(6)");
+        [TEST_CTX](const Result &r) { MANDATE(r.size() == 1UL); } >>
+        [TEST_CTX](const DrogonDbException &e) {
+            FAULT("sqlite3 - DbClient streaming-type interface(6) what():",
+                  e.base().what());
         };
     /// 1.8 delete
     *clientPtr << "delete from users where user_id = ? and user_name = ?"
                << "pg1"
                << "postgresql1" >>
-        [](const Result &r) {
-            testOutput(r.affectedRows() == 1,
-                       "sqlite3 - DbClient streaming-type interface(7)");
-        } >>
-        [](const DrogonDbException &e) {
-            std::cerr << e.base().what() << std::endl;
-            testOutput(false, "sqlite3 - DbClient streaming-type interface(7)");
+        [TEST_CTX](const Result &r) { MANDATE(r.affectedRows() == 1UL); } >>
+        [TEST_CTX](const DrogonDbException &e) {
+            FAULT("sqlite3 - DbClient streaming-type interface(7) what():",
+                  e.base().what());
         };
     /// 1.9 update
     *clientPtr << "update users set user_id = ?, user_name = ? where user_id "
@@ -1467,108 +2876,89 @@ void doSqliteTest(const drogon::orm::DbClientPtr &clientPtr)
                << "postgresql1"
                << "pg"
                << "postgresql" >>
-        [](const Result &r) {
-            testOutput(r.affectedRows() == 1,
-                       "sqlite3 - DbClient streaming-type interface(8)");
-        } >>
-        [](const DrogonDbException &e) {
-            std::cerr << e.base().what() << std::endl;
-            testOutput(false, "sqlite3 - DbClient streaming-type interface(8)");
+        [TEST_CTX](const Result &r) { MANDATE(r.affectedRows() == 1UL); } >>
+        [TEST_CTX](const DrogonDbException &e) {
+            FAULT("sqlite3 - DbClient streaming-type interface(8) what():",
+                  e.base().what());
         };
     /// 1.10 clean up
-    *clientPtr << "delete from users" >> [](const Result &r) {
-        testOutput(true, "sqlite3 - DbClient streaming-type interface(9.1)");
-    } >> [](const DrogonDbException &e) {
-        std::cerr << "error:" << e.base().what() << std::endl;
-        testOutput(false, "sqlite3 - DbClient streaming-type interface(9.1)");
+    *clientPtr << "delete from users" >> [TEST_CTX](const Result &r) {
+        SUCCESS();
+    } >> [TEST_CTX](const DrogonDbException &e) {
+        FAULT("sqlite3 - DbClient streaming-type interface(9.1) what():",
+              e.base().what());
     };
-    *clientPtr << "UPDATE sqlite_sequence SET seq = 0" >> [](const Result &r) {
-        testOutput(true, "sqlite3 - DbClient streaming-type interface(9.2)");
-    } >> [](const DrogonDbException &e) {
-        std::cerr << "error:" << e.base().what() << std::endl;
-        testOutput(false, "sqlite3 - DbClient streaming-type interface(9.2)");
-    };
+    *clientPtr << "UPDATE sqlite_sequence SET seq = 0" >>
+        [TEST_CTX](const Result &r) { SUCCESS(); } >>
+        [TEST_CTX](const DrogonDbException &e) {
+            FAULT("sqlite3 - DbClient streaming-type interface(9.2) what():",
+                  e.base().what());
+        };
     /// Test asynchronous method
     /// 2.1 insert
     clientPtr->execSqlAsync(
-        "insert into users \
-        (user_id,user_name,password,org_name) \
-        values(?,?,?,?)",
-        [](const Result &r) {
-            testOutput(r.insertId() == 1,
-                       "sqlite3 - DbClient asynchronous interface(0)");
-        },
-        [](const DrogonDbException &e) {
-            std::cerr << e.base().what() << std::endl;
-            testOutput(false, "sqlite3 - DbClient asynchronous interface(0)");
+        "insert into users "
+        "(user_id,user_name,password,org_name,create_time) "
+        "values(?,?,?,?,?)",
+        [TEST_CTX](const Result &r) { MANDATE(r.insertId() == 1ULL); },
+        [TEST_CTX](const DrogonDbException &e) {
+            FAULT("sqlite3 - DbClient asynchronous interface(0) what():",
+                  e.base().what());
         },
         "pg",
         "postgresql",
         "123",
-        "default");
+        "default",
+        trantor::Date::now());
     /// 2.2 insert
     clientPtr->execSqlAsync(
-        "insert into users \
-        (user_id,user_name,password,org_name) \
-        values(?,?,?,?)",
-        [](const Result &r) {
-            testOutput(r.affectedRows() == 1,
-                       "sqlite3 - DbClient asynchronous interface(1)");
-        },
-        [](const DrogonDbException &e) {
-            std::cerr << e.base().what() << std::endl;
-            testOutput(false, "sqlite3 - DbClient asynchronous interface(1)");
+        "insert into users "
+        "(user_id,user_name,password,org_name,create_time) "
+        "values(?,?,?,?,?)",
+        [TEST_CTX](const Result &r) { MANDATE(r.affectedRows() == 1UL); },
+        [TEST_CTX](const DrogonDbException &e) {
+            FAULT("sqlite3 - DbClient asynchronous interface(1) what():",
+                  e.base().what());
         },
         "pg1",
         "postgresql1",
         "123",
-        "default");
+        "default",
+        trantor::Date::now());
     /// 2.3 query
     clientPtr->execSqlAsync(
         "select * from users where 1 = 1",
-        [](const Result &r) {
-            testOutput(r.size() == 2,
-                       "sqlite3 - DbClient asynchronous interface(2)");
-        },
-        [](const DrogonDbException &e) {
-            std::cerr << e.base().what() << std::endl;
-            testOutput(false, "sqlite3 - DbClient asynchronous interface(2)");
+        [TEST_CTX](const Result &r) { MANDATE(r.size() == 2UL); },
+        [TEST_CTX](const DrogonDbException &e) {
+            FAULT("sqlite3 - DbClient asynchronous interface(2) what():",
+                  e.base().what());
         });
     /// 2.2 query, parameter binding
     clientPtr->execSqlAsync(
         "select * from users where id = ?",
-        [](const Result &r) {
-            testOutput(r.size() == 1,
-                       "sqlite3 - DbClient asynchronous interface(3)");
-        },
-        [](const DrogonDbException &e) {
-            std::cerr << e.base().what() << std::endl;
-            testOutput(false, "sqlite3 - DbClient asynchronous interface(3)");
+        [TEST_CTX](const Result &r) { MANDATE(r.size() == 1UL); },
+        [TEST_CTX](const DrogonDbException &e) {
+            FAULT("sqlite3 - DbClient asynchronous interface(3) what():",
+                  e.base().what());
         },
         1);
     /// 2.3 query, parameter binding
     clientPtr->execSqlAsync(
         "select * from users where user_id = ? and user_name = ?",
-        [](const Result &r) {
-            testOutput(r.size() == 1,
-                       "sqlite3 - DbClient asynchronous interface(4)");
-        },
-        [](const DrogonDbException &e) {
-            std::cerr << e.base().what() << std::endl;
-            testOutput(false, "sqlite3 - DbClient asynchronous interface(4)");
+        [TEST_CTX](const Result &r) { MANDATE(r.size() == 1UL); },
+        [TEST_CTX](const DrogonDbException &e) {
+            FAULT("sqlite3 - DbClient asynchronous interface(4) what():",
+                  e.base().what());
         },
         "pg1",
         "postgresql1");
     /// 2.4 delete
     clientPtr->execSqlAsync(
         "delete from users where user_id = ? and user_name = ?",
-        [](const Result &r) {
-            testOutput(r.affectedRows() == 1,
-                       "sqlite3 - DbClient asynchronous interface(5)");
-        },
-        [](const DrogonDbException &e) {
-            std::cerr << e.base().what() << std::endl;
-            testOutput(false, "sqlite3 - DbClient asynchronous interface(5)");
+        [TEST_CTX](const Result &r) { MANDATE(r.affectedRows() == 1UL); },
+        [TEST_CTX](const DrogonDbException &e) {
+            FAULT("sqlite3 - DbClient asynchronous interface(5) what():",
+                  e.base().what());
         },
         "pg1",
         "postgresql1");
@@ -1576,13 +2966,10 @@ void doSqliteTest(const drogon::orm::DbClientPtr &clientPtr)
     clientPtr->execSqlAsync(
         "update users set user_id = ?, user_name = ? where user_id "
         "= ? and user_name = ?",
-        [](const Result &r) {
-            testOutput(r.affectedRows() == 1,
-                       "sqlite3 - DbClient asynchronous interface(6)");
-        },
-        [](const DrogonDbException &e) {
-            std::cerr << e.base().what() << std::endl;
-            testOutput(false, "sqlite3 - DbClient asynchronous interface(6)");
+        [TEST_CTX](const Result &r) { MANDATE(r.affectedRows() == 1UL); },
+        [TEST_CTX](const DrogonDbException &e) {
+            FAULT("sqlite3 - DbClient asynchronous interface(6) what():",
+                  e.base().what());
         },
         "pg1",
         "postgresql1",
@@ -1591,21 +2978,17 @@ void doSqliteTest(const drogon::orm::DbClientPtr &clientPtr)
     /// 2.6 clean up
     clientPtr->execSqlAsync(
         "delete from users",
-        [](const Result &r) {
-            testOutput(true, "sqlite3 - DbClient asynchronous interface(7.1)");
-        },
-        [](const DrogonDbException &e) {
-            std::cerr << "error:" << e.base().what() << std::endl;
-            testOutput(false, "sqlite3 - DbClient asynchronous interface(7.1)");
+        [TEST_CTX](const Result &r) { SUCCESS(); },
+        [TEST_CTX](const DrogonDbException &e) {
+            FAULT("sqlite3 - DbClient asynchronous interface(7.1) what():",
+                  e.base().what());
         });
     clientPtr->execSqlAsync(
         "UPDATE sqlite_sequence SET seq = 0",
-        [](const Result &r) {
-            testOutput(true, "sqlite3 - DbClient asynchronous interface(7.2)");
-        },
-        [](const DrogonDbException &e) {
-            std::cerr << "error:" << e.base().what() << std::endl;
-            testOutput(false, "sqlite3 - DbClient asynchronous interface(7.2)");
+        [TEST_CTX](const Result &r) { SUCCESS(); },
+        [TEST_CTX](const DrogonDbException &e) {
+            FAULT("sqlite3 - DbClient asynchronous interface(7.2) what():",
+                  e.base().what());
         });
 
     /// Test synchronous method
@@ -1613,37 +2996,42 @@ void doSqliteTest(const drogon::orm::DbClientPtr &clientPtr)
     try
     {
         auto r = clientPtr->execSqlSync(
-            "insert into users  (user_id,user_name,password,org_name) "
-            "values(?,?,?,?)",
+            "insert into users  "
+            "(user_id,user_name,password,org_name,create_time) "
+            "values(?,?,?,?,?)",
             "pg",
             "postgresql",
             "123",
-            "default");
-        testOutput(r.insertId() == 1,
-                   "sqlite3 - DbClient synchronous interface(0)");
+            "default",
+            trantor::Date::now());
+        MANDATE(r.insertId() == 1ULL);
     }
     catch (const DrogonDbException &e)
     {
-        std::cerr << e.base().what() << std::endl;
-        testOutput(false, "sqlite3 - DbClient asynchronous interface(0)");
+        FAULT("sqlite3 - DbClient asynchronous interface(0) what():",
+              e.base().what());
     }
-    /// 3.2 insert
+    /// 3.2 insert,(std::string_view)
     try
     {
+        std::string_view sv("pg1");
+        std::string_view sv1("postgresql1");
+        std::string_view sv2("123");
         auto r = clientPtr->execSqlSync(
-            "insert into users  (user_id,user_name,password,org_name) "
-            "values(?,?,?,?)",
-            "pg1",
-            "postgresql1",
-            "123",
-            "default");
-        testOutput(r.affectedRows() == 1,
-                   "sqlite3 - DbClient synchronous interface(1)");
+            "insert into users  "
+            "(user_id,user_name,password,org_name,create_time) "
+            "values(?,?,?,?,?)",
+            sv,
+            (const std::string_view &)sv1,
+            std::move(sv2),
+            std::string_view("default"),
+            trantor::Date::now());
+        MANDATE(r.affectedRows() == 1UL);
     }
     catch (const DrogonDbException &e)
     {
-        std::cerr << e.base().what() << std::endl;
-        testOutput(false, "sqlite3 - DbClient asynchronous interface(1)");
+        FAULT("sqlite3 - DbClient asynchronous interface(1) what():",
+              e.base().what());
     }
     /// 3.3 query
     try
@@ -1652,13 +3040,12 @@ void doSqliteTest(const drogon::orm::DbClientPtr &clientPtr)
             "select * from users where user_id=? and user_name=?",
             "pg1",
             "postgresql1");
-        testOutput(r.size() == 1,
-                   "sqlite3 - DbClient synchronous interface(2)");
+        MANDATE(r.size() == 1UL);
     }
     catch (const DrogonDbException &e)
     {
-        std::cerr << e.base().what() << std::endl;
-        testOutput(false, "sqlite3 - DbClient asynchronous interface(2)");
+        FAULT("sqlite3 - DbClient asynchronous interface(2) what():",
+              e.base().what());
     }
     /// 3.4 query for none
     try
@@ -1667,13 +3054,12 @@ void doSqliteTest(const drogon::orm::DbClientPtr &clientPtr)
             "select * from users where user_id=? and user_name=?",
             "pg111",
             "postgresql1");
-        testOutput(r.size() == 0,
-                   "sqlite3 - DbClient synchronous interface(3)");
+        MANDATE(r.size() == 0UL);
     }
     catch (const DrogonDbException &e)
     {
-        std::cerr << e.base().what() << std::endl;
-        testOutput(false, "sqlite3 - DbClient asynchronous interface(3)");
+        FAULT("sqlite3 - DbClient asynchronous interface(3) what():",
+              e.base().what());
     }
     /// 3.5 bad sql
     try
@@ -1682,73 +3068,70 @@ void doSqliteTest(const drogon::orm::DbClientPtr &clientPtr)
             "select * from users where user_id=? and user_name='1234'",
             "pg111",
             "postgresql1");
-        testOutput(r.size() == 0,
-                   "sqlite3 - DbClient synchronous interface(4)");
+        MANDATE(r.size() == 0UL);
     }
     catch (const DrogonDbException &e)
     {
-        // std::cerr << e.base().what() << std::endl;
-        testOutput(true, "sqlite3 - DbClient asynchronous interface(4)");
+        SUCCESS();
     }
     /// 3.6 clean up
     try
     {
         auto r = clientPtr->execSqlSync("delete from users");
-        testOutput(true, "sqlite3 - DbClient synchronous interface(5.1)");
+        SUCCESS();
     }
     catch (const DrogonDbException &e)
     {
-        // std::cerr << e.base().what() << std::endl;
-        testOutput(true, "sqlite3 - DbClient asynchronous interface(5.1)");
+        SUCCESS();
     }
     try
     {
         auto r = clientPtr->execSqlSync("UPDATE sqlite_sequence SET seq = 0");
-        testOutput(true, "sqlite3 - DbClient synchronous interface(5.2)");
+        SUCCESS();
     }
     catch (const DrogonDbException &e)
     {
-        // std::cerr << e.base().what() << std::endl;
-        testOutput(true, "sqlite3 - DbClient asynchronous interface(5.2)");
+        SUCCESS();
     }
 
     /// Test future interface
     /// 4.1 insert
     auto f = clientPtr->execSqlAsyncFuture(
-        "insert into users  (user_id,user_name,password,org_name) "
-        "values(?,?,?,?) ",
+        "insert into users  (user_id,user_name,password,org_name,create_time) "
+        "values(?,?,?,?,?) ",
         "pg",
         "postgresql",
         "123",
-        "default");
+        "default",
+        trantor::Date::now());
     try
     {
         auto r = f.get();
-        testOutput(r.insertId() == 1, "sqlite3 - DbClient future interface(0)");
+        MANDATE(r.insertId() == 1ULL);
     }
     catch (const DrogonDbException &e)
     {
-        std::cerr << e.base().what() << std::endl;
-        testOutput(false, "sqlite3 - DbClient future interface(0)");
+        FAULT("sqlite3 - DbClient future interface(0) what():",
+              e.base().what());
     }
     /// 4.2 insert
     f = clientPtr->execSqlAsyncFuture(
-        "insert into users  (user_id,user_name,password,org_name) "
-        "values(?,?,?,?)",
+        "insert into users  (user_id,user_name,password,org_name,create_time) "
+        "values(?,?,?,?,?)",
         "pg1",
         "postgresql1",
         "123",
-        "default");
+        "default",
+        trantor::Date::now());
     try
     {
         auto r = f.get();
-        testOutput(r.affectedRows() == 1,
-                   "sqlite3 - DbClient future interface(1)");
+        MANDATE(r.affectedRows() == 1UL);
     }
     catch (const DrogonDbException &e)
     {
-        std::cerr << e.base().what() << std::endl;
-        testOutput(false, "sqlite3 - DbClient future interface(1)");
+        FAULT("sqlite3 - DbClient future interface(1) what():",
+              e.base().what());
     }
     /// 4.3 query
     f = clientPtr->execSqlAsyncFuture(
@@ -1758,12 +3141,12 @@ void doSqliteTest(const drogon::orm::DbClientPtr &clientPtr)
     try
     {
         auto r = f.get();
-        testOutput(r.size() == 1, "sqlite3 - DbClient future interface(2)");
+        MANDATE(r.size() == 1UL);
     }
     catch (const DrogonDbException &e)
     {
-        std::cerr << e.base().what() << std::endl;
-        testOutput(false, "sqlite3 - DbClient future interface(2)");
+        FAULT("sqlite3 - DbClient future interface(2) what():",
+              e.base().what());
     }
     /// 4.4 query for none
     f = clientPtr->execSqlAsyncFuture(
@@ -1773,12 +3156,12 @@ void doSqliteTest(const drogon::orm::DbClientPtr &clientPtr)
     try
     {
         auto r = f.get();
-        testOutput(r.size() == 0, "sqlite3 - DbClient future interface(3)");
+        MANDATE(r.size() == 0UL);
     }
     catch (const DrogonDbException &e)
     {
-        std::cerr << e.base().what() << std::endl;
-        testOutput(false, "sqlite3 - DbClient future interface(3)");
+        FAULT("sqlite3 - DbClient future interface(3) what():",
+              e.base().what());
     }
     /// 4.5 bad sql
     f = clientPtr->execSqlAsyncFuture(
@@ -1788,35 +3171,34 @@ void doSqliteTest(const drogon::orm::DbClientPtr &clientPtr)
     try
     {
         auto r = f.get();
-        testOutput(r.size() == 0, "sqlite3 - DbClient future interface(4)");
+        MANDATE(r.size() == 0UL);
     }
     catch (const DrogonDbException &e)
     {
-        // std::cerr << e.base().what() << std::endl;
-        testOutput(true, "sqlite3 - DbClient future interface(4)");
+        SUCCESS();
     }
     /// 4.6 clean up
     f = clientPtr->execSqlAsyncFuture("delete from users");
     try
     {
         auto r = f.get();
-        testOutput(true, "sqlite3 - DbClient future interface(5.1)");
+        SUCCESS();
     }
     catch (const DrogonDbException &e)
     {
-        // std::cerr << e.base().what() << std::endl;
-        testOutput(false, "sqlite3 - DbClient future interface(5.1)");
+        FAULT("sqlite3 - DbClient future interface(5.1) what():",
+              e.base().what());
     }
     f = clientPtr->execSqlAsyncFuture("UPDATE sqlite_sequence SET seq = 0");
     try
     {
         auto r = f.get();
-        testOutput(true, "sqlite3 - DbClient future interface(5.2)");
+        SUCCESS();
     }
     catch (const DrogonDbException &e)
     {
-        // std::cerr << e.base().what() << std::endl;
-        testOutput(false, "sqlite3 - DbClient future interface(5.2)");
+        FAULT("sqlite3 - DbClient future interface(5.2) what():",
+              e.base().what());
     }
 
     /// 5 Test Result and Row exception throwing
@@ -1828,29 +3210,29 @@ void doSqliteTest(const drogon::orm::DbClientPtr &clientPtr)
             "pg111",
             "postgresql1");
         r.at(0);
-        testOutput(false, "sqlite3 - Result throwing exceptions(0)");
+        FAULT("sqlite3 - Result throwing exceptions(0)");
     }
     catch (const DrogonDbException &e)
     {
-        std::cerr << e.base().what() << std::endl;
-        testOutput(true, "sqlite3 -  Result throwing exceptions(0)");
+        SUCCESS();
     }
     // 5.2 insert one just for setup
     try
     {
         auto r = clientPtr->execSqlSync(
-            "insert into users  (user_id,user_name,password,org_name) "
-            "values(?,?,?,?)",
+            "insert into users  "
+            "(user_id,user_name,password,org_name,create_time) "
+            "values(?,?,?,?,?)",
             "pg",
             "postgresql",
             "123",
-            "default");
-        testOutput(r.insertId() == 1, "sqlite3 - Row throwing exceptions(0)");
+            "default",
+            trantor::Date::now());
+        MANDATE(r.insertId() == 1ULL);
     }
     catch (const DrogonDbException &e)
     {
-        std::cerr << e.base().what() << std::endl;
-        testOutput(false, "sqlite3 - Row throwing exceptions(0)");
+        FAULT("sqlite3 - Row throwing exceptions(0) what():", e.base().what());
     }
 
     // 5.3 try to access nonexistent column by name
@@ -1859,12 +3241,11 @@ void doSqliteTest(const drogon::orm::DbClientPtr &clientPtr)
         auto r = clientPtr->execSqlSync("select * from users");
         auto row = r.at(0);
         row["imaginary_column"];
-        testOutput(false, "sqlite3 - Row throwing exceptions(1)");
+        FAULT("sqlite3 - Row throwing exceptions(1)");
     }
     catch (const DrogonDbException &e)
     {
-        std::cerr << e.base().what() << std::endl;
-        testOutput(true, "sqlite3 -  Row throwing exceptions(1)");
+        SUCCESS();
     }
 
     // 5.4 try to access nonexistent column by index
@@ -1873,156 +3254,692 @@ void doSqliteTest(const drogon::orm::DbClientPtr &clientPtr)
         auto r = clientPtr->execSqlSync("select * from users");
         auto row = r.at(0);
         row.at(420);
-        testOutput(false, "sqlite3 - Row throwing exceptions(2)");
+        FAULT("sqlite3 - Row throwing exceptions(2)");
     }
     catch (const DrogonDbException &e)
     {
-        std::cerr << e.base().what() << std::endl;
-        testOutput(true, "sqlite3 -  Row throwing exceptions(2)");
+        SUCCESS();
     }
 
     // 5.5 cleanup
     try
     {
         auto r = clientPtr->execSqlSync("delete from users");
-        testOutput(true, "sqlite3 - Row throwing exceptions(3)");
+        SUCCESS();
     }
     catch (const DrogonDbException &e)
     {
-        std::cerr << e.base().what() << std::endl;
-        testOutput(false, "sqlite3 -  Row throwing exceptions(3)");
+        FAULT("sqlite3 -  Row throwing exceptions(3) what():", e.base().what());
     }
     try
     {
         auto r = clientPtr->execSqlSync("UPDATE sqlite_sequence SET seq = 0");
-        testOutput(true, "sqlite3 - Row throwing exceptions(3)");
+        SUCCESS();
     }
     catch (const DrogonDbException &e)
     {
-        std::cerr << e.base().what() << std::endl;
-        testOutput(false, "sqlite3 -  Row throwing exceptions(3)");
+        FAULT("sqlite3 -  Row throwing exceptions(3) what():", e.base().what());
     }
 
     /// Test ORM mapper TODO
     /// 5.1 insert, noneblocking
     using namespace drogon_model::sqlite3;
-    drogon::orm::Mapper<Users> mapper(clientPtr);
+    Mapper<Users> mapper(clientPtr);
     Users user;
     user.setUserId("pg");
     user.setUserName("postgres");
     user.setPassword("123");
     user.setOrgName("default");
+    user.setCreateTime(trantor::Date::now());
     mapper.insert(
         user,
-        [](Users ret) {
-            testOutput(ret.getPrimaryKey() == 1,
-                       "sqlite3 - ORM mapper asynchronous interface(0)");
-        },
-        [](const DrogonDbException &e) {
-            std::cerr << e.base().what() << std::endl;
-            testOutput(false, "sqlite3 - ORM mapper asynchronous interface(0)");
+        [TEST_CTX](Users ret) { MANDATE(ret.getPrimaryKey() == 1UL); },
+        [TEST_CTX](const DrogonDbException &e) {
+            FAULT("sqlite3 - ORM mapper asynchronous interface(0) what():",
+                  e.base().what());
         });
     /// 5.2 insert
     user.setUserId("pg1");
     user.setUserName("postgres1");
     mapper.insert(
         user,
-        [](Users ret) {
-            testOutput(ret.getPrimaryKey() == 2,
-                       "sqlite3 - ORM mapper asynchronous interface(1)");
-        },
-        [](const DrogonDbException &e) {
-            std::cerr << e.base().what() << std::endl;
-            testOutput(false, "sqlite3 - ORM mapper asynchronous interface(1)");
+        [TEST_CTX](Users ret) { MANDATE(ret.getPrimaryKey() == 2UL); },
+        [TEST_CTX](const DrogonDbException &e) {
+            FAULT("sqlite3 - ORM mapper asynchronous interface(1) what():",
+                  e.base().what());
         });
     /// 5.3 select where in
     mapper.findBy(
         Criteria(Users::Cols::_id,
                  CompareOperator::In,
                  std::vector<int32_t>{2, 200}),
-        [](std::vector<Users> users) {
-            testOutput(users.size() == 1,
-                       "sqlite3 - ORM mapper asynchronous interface(2)");
-        },
-        [](const DrogonDbException &e) {
-            std::cerr << e.base().what() << std::endl;
-            testOutput(false, "sqlite3 - ORM mapper asynchronous interface(2)");
+        [TEST_CTX](std::vector<Users> users) { MANDATE(users.size() == 1UL); },
+        [TEST_CTX](const DrogonDbException &e) {
+            FAULT("sqlite3 - ORM mapper asynchronous interface(2) what():",
+                  e.base().what());
         });
     /// 5.3.5 count
     mapper.count(
-        drogon::orm::Criteria(Users::Cols::_id, CompareOperator::EQ, 2),
-        [](const size_t c) {
-            testOutput(c == 1,
-                       "sqlite3 - ORM mapper asynchronous interface(3)");
-        },
-        [](const DrogonDbException &e) {
-            std::cerr << e.base().what() << std::endl;
-            testOutput(false, "sqlite3 - ORM mapper asynchronous interface(3)");
+        Criteria(Users::Cols::_id, CompareOperator::EQ, 2),
+        [TEST_CTX](const size_t c) { MANDATE(c == 1UL); },
+        [TEST_CTX](const DrogonDbException &e) {
+            FAULT("sqlite3 - ORM mapper asynchronous interface(3) what():",
+                  e.base().what());
+        });
+    /// 5.3.6 custom where query
+    mapper.findBy(
+        Criteria("password is not null"_sql),
+        [TEST_CTX](std::vector<Users> users) { MANDATE(users.size() == 2); },
+        [TEST_CTX](const DrogonDbException &e) {
+            FAULT("sqlite3 - ORM mapper asynchronous interface(4) what():",
+                  e.base().what());
         });
     /// 5.4 find by primary key. blocking
     try
     {
         auto user = mapper.findByPrimaryKey(1);
-        testOutput(true, "sqlite3 - ORM mapper synchronous interface(0)");
+        SUCCESS();
     }
     catch (const DrogonDbException &e)
     {
-        std::cerr << e.base().what() << std::endl;
-        testOutput(false, "sqlite3 - ORM mapper synchronous interface(0)");
+        FAULT("sqlite3 - ORM mapper synchronous interface(0) what():",
+              e.base().what());
+    }
+
+    /// Test ORM QueryBuilder
+    /// execSync
+    try
+    {
+        const std::vector<Users> users =
+            QueryBuilder<Users>{}.from("users").selectAll().execSync(clientPtr);
+        MANDATE(users.size() == 2);
+    }
+    catch (const DrogonDbException &e)
+    {
+        FAULT("sqlite3 - ORM QueryBuilder synchronous interface(0) what():",
+              e.base().what());
+    }
+    try
+    {
+        const Result users =
+            QueryBuilder<Users>{}.from("users").select("id").execSync(
+                clientPtr);
+        MANDATE(users.size() == 2);
+        for (const Row &u : users)
+        {
+            MANDATE(!u["id"].isNull());
+        }
+    }
+    catch (const DrogonDbException &e)
+    {
+        FAULT("sqlite3 - ORM QueryBuilder synchronous interface(1) what():",
+              e.base().what());
+    }
+    try
+    {
+        const Users user = QueryBuilder<Users>{}
+                               .from("users")
+                               .selectAll()
+                               .eq("id", "2")
+                               .limit(1)
+                               .single()
+                               .order("id", false)
+                               .execSync(clientPtr);
+        MANDATE(user.getPrimaryKey() == 2);
+    }
+    catch (const DrogonDbException &e)
+    {
+        FAULT("sqlite3 - ORM QueryBuilder synchronous interface(2) what():",
+              e.base().what());
+    }
+    try
+    {
+        const Row user = QueryBuilder<Users>{}
+                             .from("users")
+                             .select("id")
+                             .limit(1)
+                             .single()
+                             .order("id", false)
+                             .execSync(clientPtr);
+        MANDATE(user["id"].as<int32_t>() == 2);
+    }
+    catch (const DrogonDbException &e)
+    {
+        FAULT("sqlite3 - ORM QueryBuilder synchronous interface(3) what():",
+              e.base().what());
+    }
+
+    /// execAsyncFuture
+    {
+        std::future<std::vector<Users>> users =
+            QueryBuilder<Users>{}.from("users").selectAll().execAsyncFuture(
+                clientPtr);
+        try
+        {
+            const std::vector<Users> r = users.get();
+            MANDATE(r.size() == 2);
+        }
+        catch (const DrogonDbException &e)
+        {
+            FAULT(
+                "sqlite3 - ORM QueryBuilder asynchronous interface(0) "
+                "what():",
+                e.base().what());
+        }
+    }
+    {
+        std::future<Result> users =
+            QueryBuilder<Users>{}.from("users").select("id").execAsyncFuture(
+                clientPtr);
+        try
+        {
+            const Result r = users.get();
+            MANDATE(r.size() == 2);
+            for (const Row &u : r)
+            {
+                MANDATE(!u["id"].isNull());
+            }
+        }
+        catch (const DrogonDbException &e)
+        {
+            FAULT(
+                "sqlite3 - ORM QueryBuilder asynchronous interface(1) "
+                "what():",
+                e.base().what());
+        }
+    }
+    {
+        std::future<Users> user = QueryBuilder<Users>{}
+                                      .from("users")
+                                      .selectAll()
+                                      .eq("id", "2")
+                                      .limit(1)
+                                      .single()
+                                      .order("id", false)
+                                      .execAsyncFuture(clientPtr);
+        try
+        {
+            const Users r = user.get();
+            MANDATE(r.getPrimaryKey() == 2);
+        }
+        catch (const DrogonDbException &e)
+        {
+            FAULT(
+                "sqlite3 - ORM QueryBuilder asynchronous interface(2) "
+                "what():",
+                e.base().what());
+        }
+    }
+    {
+        std::future<Row> users = QueryBuilder<Users>{}
+                                     .from("users")
+                                     .select("id")
+                                     .limit(1)
+                                     .single()
+                                     .order("id", false)
+                                     .execAsyncFuture(clientPtr);
+        try
+        {
+            const Row r = users.get();
+            MANDATE(r["id"].as<int32_t>() == 2);
+        }
+        catch (const DrogonDbException &e)
+        {
+            FAULT(
+                "sqlite3 - ORM QueryBuilder asynchronous interface(3) "
+                "what():",
+                e.base().what());
+        }
+    }
+
+#ifdef __cpp_impl_coroutine
+    auto coro_test = [clientPtr, TEST_CTX]() -> drogon::Task<> {
+        /// 7 Test coroutines.
+        /// This is by no means comprehensive. But coroutine API is essentially
+        /// a wrapper around callbacks. The purpose is to test the interface
+        /// works 7.1 Basic queries
+        try
+        {
+            auto result =
+                co_await clientPtr->execSqlCoro("select * from users;");
+            MANDATE(result.size() != 0UL);
+        }
+        catch (const DrogonDbException &e)
+        {
+            FAULT("sqlite3 - DbClient coroutine interface(0) what():",
+                  e.base().what());
+        }
+        /// 7.2 Parameter binding
+        try
+        {
+            auto result = co_await clientPtr->execSqlCoro(
+                "select * from users where 1=?;", 1);
+            MANDATE(result.size() != 0UL);
+        }
+        catch (const DrogonDbException &e)
+        {
+            FAULT("sqlite3 - DbClient coroutine interface(1) what():",
+                  e.base().what());
+        }
+        /// 7.3 ORM CoroMapper
+        try
+        {
+            auto mapper = CoroMapper<Users>(clientPtr);
+            auto user = co_await mapper.findOne(
+                Criteria(Users::Cols::_id, CompareOperator::EQ, 1));
+            SUCCESS();
+        }
+        catch (const DrogonDbException &e)
+        {
+            FAULT("sqlite3 - CoroMapper coroutine interface(0) what():",
+                  e.base().what());
+        }
+        try
+        {
+            auto mapper = CoroMapper<Users>(clientPtr);
+            auto users = co_await mapper.findBy(
+                Criteria(Users::Cols::_id, CompareOperator::EQ, 1));
+            MANDATE(users.size() == 1UL);
+        }
+        catch (const DrogonDbException &e)
+        {
+            FAULT("sqlite3 - CoroMapper coroutine interface(1) what():",
+                  e.base().what());
+        }
+        try
+        {
+            auto mapper = CoroMapper<Users>(clientPtr);
+            auto n = co_await mapper.deleteByPrimaryKey(1);
+            MANDATE(n == 1);
+        }
+        catch (const DrogonDbException &e)
+        {
+            FAULT("sqlite3 - CoroMapper coroutine interface(2) what():",
+                  e.base().what());
+        }
+        co_await drogon::sleepCoro(
+            trantor::EventLoop::getEventLoopOfCurrentThread(), 1.0s);
+    };
+    drogon::sync_wait(coro_test());
+
+#endif
+
+    /// 8 Test ORM related query
+    /// 8.1 async
+    /// 8.1.1 one-to-one
+    Mapper<Wallets> walletsMapper(clientPtr);
+
+    /// prepare
+    {
+        Wallets wallet;
+        wallet.setUserId("pg");
+        wallet.setAmount("2000.00");
+        try
+        {
+            walletsMapper.insert(wallet);
+            SUCCESS();
+        }
+        catch (const DrogonDbException &e)
+        {
+            FAULT("sqlite3 - ORM mapper related prepare(0) what():",
+                  e.base().what());
+        }
+    }
+
+    /// users to wallets
+    {
+        Users user;
+        user.setUserId("pg");
+        user.getWallet(
+            clientPtr,
+            [TEST_CTX](Wallets r) { MANDATE(r.getValueOfAmount() == "2000"); },
+            [TEST_CTX](const DrogonDbException &e) {
+                FAULT(
+                    "sqlite3 - ORM mapper related async one-to-one(0) what(): ",
+                    e.base().what());
+            });
+    }
+    /// users to wallets without data
+    {
+        Users user;
+        user.setUserId("pg1");
+        user.getWallet(
+            clientPtr,
+            [TEST_CTX](Wallets w) {
+                FAULT("sqlite3 - ORM mapper related async one-to-one(1)");
+            },
+            [TEST_CTX](const DrogonDbException &e) { SUCCESS(); });
+    }
+
+    /// 8.1.2 one-to-many
+    Mapper<Category> categoryMapper(clientPtr);
+    Mapper<Blog> blogMapper(clientPtr);
+
+    /// prepare
+    {
+        Category category;
+        category.setName("category1");
+        try
+        {
+            categoryMapper.insert(category);
+            SUCCESS();
+        }
+        catch (const DrogonDbException &e)
+        {
+            FAULT("sqlite3 - ORM mapper related prepare(1) what():",
+                  e.base().what());
+        }
+        category.setName("category2");
+        try
+        {
+            categoryMapper.insert(category);
+            SUCCESS();
+        }
+        catch (const DrogonDbException &e)
+        {
+            FAULT("sqlite3 - ORM mapper related prepare(2) what():",
+                  e.base().what());
+        }
+        Blog blog;
+        blog.setTitle("title1");
+        blog.setCategoryId(1);
+        try
+        {
+            blogMapper.insert(blog);
+            SUCCESS();
+        }
+        catch (const DrogonDbException &e)
+        {
+            FAULT("sqlite3 - ORM mapper related prepare(3) what():",
+                  e.base().what());
+        }
+        blog.setTitle("title2");
+        blog.setCategoryId(1);
+        try
+        {
+            blogMapper.insert(blog);
+            SUCCESS();
+        }
+        catch (const DrogonDbException &e)
+        {
+            FAULT("sqlite3 - ORM mapper related prepare(4) what():",
+                  e.base().what());
+        }
+        blog.setTitle("title3");
+        blog.setCategoryId(3);
+        try
+        {
+            blogMapper.insert(blog);
+            SUCCESS();
+        }
+        catch (const DrogonDbException &e)
+        {
+            FAULT("sqlite3 - ORM mapper related prepare(5) what():",
+                  e.base().what());
+        }
+    }
+
+    /// categories to blogs
+    {
+        Category category;
+        category.setId(1);
+        category.getBlogs(
+            clientPtr,
+            [TEST_CTX](std::vector<Blog> r) { MANDATE(r.size() == 2); },
+            [TEST_CTX](const DrogonDbException &e) {
+                FAULT(
+                    "sqlite3 - ORM mapper related async one-to-many(0) "
+                    "what(): ",
+                    e.base().what());
+            });
+    }
+    /// categories to blogs without data
+    {
+        Category category;
+        category.setId(2);
+        category.getBlogs(
+            clientPtr,
+            [TEST_CTX](std::vector<Blog> r) { MANDATE(r.size() == 0); },
+            [TEST_CTX](const DrogonDbException &e) {
+                FAULT(
+                    "sqlite3 - ORM mapper related async one-to-many(1) "
+                    "what(): ",
+                    e.base().what());
+            });
+    }
+    /// blogs to categories
+    {
+        Blog blog;
+        blog.setCategoryId(1);
+        blog.getCategory(
+            clientPtr,
+            [TEST_CTX](Category r) {
+                MANDATE(r.getValueOfName() == "category1");
+            },
+            [TEST_CTX](const DrogonDbException &e) {
+                FAULT(
+                    "sqlite3 - ORM mapper related async one-to-many(2) "
+                    "what(): ",
+                    e.base().what());
+            });
+    }
+    /// blogs to categories without data
+    {
+        Blog blog;
+        blog.setCategoryId(3);
+        blog.getCategory(
+            clientPtr,
+            [TEST_CTX](Category r) {
+                FAULT("sqlite3 - ORM mapper related async one-to-many(3)");
+            },
+            [TEST_CTX](const DrogonDbException &e) { SUCCESS(); });
+    }
+
+    /// 8.1.3 many-to-many
+    Mapper<BlogTag> blogTagMapper(clientPtr);
+    Mapper<Tag> tagMapper(clientPtr);
+
+    /// prepare
+    {
+        BlogTag blogTag;
+        blogTag.setBlogId(1);
+        blogTag.setTagId(1);
+        try
+        {
+            blogTagMapper.insert(blogTag);
+            SUCCESS();
+        }
+        catch (const DrogonDbException &e)
+        {
+            FAULT("sqlite3 - ORM mapper related prepare(6) what():",
+                  e.base().what());
+        }
+        blogTag.setBlogId(1);
+        blogTag.setTagId(2);
+        try
+        {
+            blogTagMapper.insert(blogTag);
+            SUCCESS();
+        }
+        catch (const DrogonDbException &e)
+        {
+            FAULT("sqlite3 - ORM mapper related prepare(7) what():",
+                  e.base().what());
+        }
+        Tag tag;
+        tag.setName("tag1");
+        try
+        {
+            tagMapper.insert(tag);
+            SUCCESS();
+        }
+        catch (const DrogonDbException &e)
+        {
+            FAULT("sqlite3 - ORM mapper related prepare(8) what():",
+                  e.base().what());
+        }
+        tag.setName("tag2");
+        try
+        {
+            tagMapper.insert(tag);
+            SUCCESS();
+        }
+        catch (const DrogonDbException &e)
+        {
+            FAULT("sqlite3 - ORM mapper related prepare(9) what():",
+                  e.base().what());
+        }
+    }
+
+    /// blogs to tags
+    {
+        Blog blog;
+        blog.setId(1);
+        blog.getTags(
+            clientPtr,
+            [TEST_CTX](std::vector<std::pair<Tag, BlogTag>> r) {
+                MANDATE(r.size() == 2);
+            },
+            [TEST_CTX](const DrogonDbException &e) {
+                FAULT(
+                    "sqlite3 - ORM mapper related async many-to-many(0) "
+                    "what():",
+                    e.base().what());
+            });
+    }
+
+    /// 8.2 async
+    /// 8.2.1 one-to-one
+    /// users to wallets
+    {
+        Users user;
+        user.setUserId("pg");
+        try
+        {
+            auto r = user.getWallet(clientPtr);
+            MANDATE(r.getValueOfAmount() == "2000");
+        }
+        catch (const DrogonDbException &e)
+        {
+            FAULT("sqlite3 - ORM mapper related sync one-to-one(0) what():",
+                  e.base().what());
+        }
+    }
+    /// users to wallets without data
+    {
+        Users user;
+        user.setUserId("pg1");
+        try
+        {
+            auto r = user.getWallet(clientPtr);
+            FAULT("sqlite3 - ORM mapper related sync one-to-one(1)");
+        }
+        catch (const DrogonDbException &e)
+        {
+            SUCCESS();
+        }
+    }
+
+    /// 8.2.2 one-to-many
+    /// categories to blogs
+    {
+        Category category;
+        category.setId(1);
+        try
+        {
+            auto r = category.getBlogs(clientPtr);
+            MANDATE(r.size() == 2);
+        }
+        catch (const DrogonDbException &e)
+        {
+            FAULT("sqlite3 - ORM mapper related sync one-to-many(0) what():",
+                  e.base().what());
+        }
+    }
+    /// categories to blogs without data
+    {
+        Category category;
+        category.setId(2);
+        try
+        {
+            auto r = category.getBlogs(clientPtr);
+            MANDATE(r.size() == 0);
+        }
+        catch (const DrogonDbException &e)
+        {
+            FAULT("sqlite3 - ORM mapper related sync one-to-many(1) what():",
+                  e.base().what());
+        }
+    }
+    /// blogs to categories
+    {
+        Blog blog;
+        blog.setCategoryId(1);
+        try
+        {
+            auto r = blog.getCategory(clientPtr);
+            MANDATE(r.getValueOfName() == "category1");
+        }
+        catch (const DrogonDbException &e)
+        {
+            FAULT("sqlite3 - ORM mapper related sync one-to-many(2) what():",
+                  e.base().what());
+        }
+    }
+    /// blogs to categories without data
+    {
+        Blog blog;
+        blog.setCategoryId(3);
+        try
+        {
+            auto r = blog.getCategory(clientPtr);
+            FAULT("sqlite3 - ORM mapper related sync one-to-many(3)");
+        }
+        catch (const DrogonDbException &e)
+        {
+            SUCCESS();
+        }
+    }
+
+    /// 8.2.3 many-to-many
+    /// blogs to tags
+    {
+        Blog blog;
+        blog.setId(1);
+        try
+        {
+            auto r = blog.getTags(clientPtr);
+            MANDATE(r.size() == 2);
+        }
+        catch (const DrogonDbException &e)
+        {
+            FAULT("sqlite3 - ORM mapper related sync many-to-many(0) what():",
+                  e.base().what());
+        }
     }
 }
+#endif
 
-int main(int argc, char *argv[])
+using namespace drogon;
+
+int main(int argc, char **argv)
 {
-    trantor::Logger::setLogLevel(trantor::Logger::kDebug);
+    trantor::Logger::setLogLevel(trantor::Logger::LogLevel::kDebug);
+
+#if USE_MYSQL
+    mysqlClient = DbClient::newMysqlClient(
+        "host=127.0.0.1 port=3306 user=root client_encoding=utf8mb4", 1);
+#endif
 #if USE_POSTGRESQL
-    auto postgre_client = DbClient::newPgClient(
-        "host=127.0.0.1 port=5432 dbname=postgres user=postgres "
+    postgreClient = DbClient::newPgClient(
+        "host=127.0.0.1 port=5432 dbname=postgres user=postgres password=12345 "
         "client_encoding=utf8",
-        1);
-#endif
-#if USE_MYSQL
-    auto mysql_client = DbClient::newMysqlClient(
-        "host=localhost port=3306 user=root client_encoding=utf8mb4", 1);
+        1,
+        true);
 #endif
 #if USE_SQLITE3
-    auto sqlite_client = DbClient::newSqlite3Client("filename=:memory:", 1);
+    sqlite3Client = DbClient::newSqlite3Client("filename=:memory:", 1);
 #endif
-    LOG_DEBUG << "start!";
-    std::this_thread::sleep_for(1s);
-    if (argc == 2)
-    {
-        gLoops = atoi(argv[1]);
-    }
-    test_count = get_test_count();
-    for (int i = 0; i < gLoops; ++i)
-    {
-#if USE_POSTGRESQL
-        doPostgreTest(postgre_client);
-#endif
-#if USE_MYSQL
-        doMysqlTest(mysql_client);
-#endif
-#if USE_SQLITE3
-        doSqliteTest(sqlite_client);
-#endif
-    }
-    globalf.get();
-    std::this_thread::sleep_for(0.008s);
-    return 0;
-}
-
-int get_test_count()
-{
-    int test_count = 0;
-#if USE_POSTGRESQL
-    test_count += postgre_tests * gLoops;
-#endif
-#if USE_MYSQL
-    test_count += mysql_tests * gLoops;
-#endif
-#if USE_SQLITE3
-    test_count += sqlite_tests * gLoops;
-#endif
-    return test_count;
+    const int testStatus = test::run(argc, argv);
+    return testStatus;
 }

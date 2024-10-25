@@ -21,21 +21,22 @@ int main()
     LOG_DEBUG << "start!";
     // *clientPtr << "Drop table groups;" << Mode::Blocking >>
     //     [](const Result &r) {
-    //         LOG_DEBUG << "droped";
+    //         LOG_DEBUG << "dropped";
     //     } >>
     //     [](const DrogonDbException &e) {
     //         std::cout << e.base().what() << std::endl;
     //     };
     // ;
-    *clientPtr
-            << "CREATE TABLE IF NOT EXISTS GROUPS (GROUP_ID INTEGER PRIMARY KEY autoincrement,\
-     GROUP_NAME TEXT,\
-     CREATER_ID INTEGER,\
-     CREATE_TIME TEXT,\
-     INVITING INTEGER,\
-     INVITING_USER_ID INTEGER,\
-     AVATAR_ID TEXT, uuu double, text VARCHAR(255),avatar blob,is_default bool)"
-            << Mode::Blocking >>
+    *clientPtr << "CREATE TABLE IF NOT EXISTS GROUPS (GROUP_ID INTEGER PRIMARY "
+                  "KEY autoincrement,"
+                  "GROUP_NAME TEXT,"
+                  "CREATER_ID INTEGER,"
+                  "CREATE_TIME TEXT,"
+                  "INVITING INTEGER,"
+                  "INVITING_USER_ID INTEGER,"
+                  "AVATAR_ID TEXT, uuu double, text VARCHAR(255),avatar "
+                  "blob,is_default bool)"
+               << Mode::Blocking >>
         [](const Result &r) { LOG_DEBUG << "created"; } >>
         [](const DrogonDbException &e) {
             std::cout << e.base().what() << std::endl;
@@ -86,7 +87,7 @@ int main()
                     group.setAvatarId("xixi");
                     mapper.update(
                         group,
-                        [=](const size_t count) {
+                        [](const size_t count) {
                             LOG_DEBUG << "update " << count << " rows";
                         },
                         [](const DrogonDbException &e) {
@@ -109,11 +110,9 @@ int main()
             for (auto row : r)
             {
                 std::cout << "is_default: "
-                          << (row[(unsigned long)0].isNull() ? "is null, "
-                                                             : "is not null, ")
-                          << "bool value:" << row[(unsigned long)0].as<bool>()
-                          << "(" << row[(unsigned long)0].as<std::string>()
-                          << ")" << std::endl;
+                          << (row[0].isNull() ? "is null, " : "is not null, ")
+                          << "bool value:" << row[0].as<bool>() << "("
+                          << row[0].as<std::string>() << ")" << std::endl;
             }
         } >> [](const DrogonDbException &e) {
             std::cerr << e.base().what() << std::endl;

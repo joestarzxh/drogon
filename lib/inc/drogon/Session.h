@@ -1,7 +1,7 @@
 /**
  *
  *  @file Session.h
- *  An Tao
+ *  @author An Tao
  *
  *  Copyright 2018, An Tao.  All rights reserved.
  *  https://github.com/an-tao/drogon
@@ -14,12 +14,13 @@
 
 #pragma once
 
-#include <drogon/utils/any.h>
 #include <trantor/utils/Logger.h>
 #include <map>
 #include <memory>
 #include <mutex>
 #include <thread>
+#include <optional>
+#include <any>
 
 namespace drogon
 {
@@ -30,7 +31,8 @@ namespace drogon
 class Session
 {
   public:
-    using SessionMap = std::map<std::string, any>;
+    using SessionMap = std::map<std::string, std::any>;
+
     /**
      * @brief Get the data identified by the key parameter.
      * @note if the data is not found, a default value is returned.
@@ -49,7 +51,7 @@ class Session
             {
                 if (typeid(T) == it->second.type())
                 {
-                    return *(any_cast<T>(&(it->second)));
+                    return *(std::any_cast<T>(&(it->second)));
                 }
                 else
                 {
@@ -59,6 +61,36 @@ class Session
         }
         return T();
     }
+
+    /**
+     * @brief Get the data identified by the key parameter and return an
+     * optional object that wraps the data.
+     *
+     * @tparam T
+     * @param key
+     * @return optional<T>
+     */
+    template <typename T>
+    std::optional<T> getOptional(const std::string &key) const
+    {
+        {
+            std::lock_guard<std::mutex> lck(mutex_);
+            auto it = sessionMap_.find(key);
+            if (it != sessionMap_.end())
+            {
+                if (typeid(T) == it->second.type())
+                {
+                    return *(std::any_cast<T>(&(it->second)));
+                }
+                else
+                {
+                    LOG_ERROR << "Bad type";
+                }
+            }
+        }
+        return std::nullopt;
+    }
+
     /**
      * @brief Modify or visit the data identified by the key parameter.
      *
@@ -81,7 +113,7 @@ class Session
         {
             if (typeid(T) == it->second.type())
             {
-                handler(*(any_cast<T>(&(it->second))));
+                handler(*(std::any_cast<T>(&(it->second))));
             }
             else
             {
@@ -92,9 +124,10 @@ class Session
         {
             auto item = T();
             handler(item);
-            sessionMap_.insert(std::make_pair(key, any(std::move(item))));
+            sessionMap_.insert(std::make_pair(key, std::any(std::move(item))));
         }
     }
+
     /**
      * @brief Modify or visit the session data.
      *
@@ -117,8 +150,9 @@ class Session
      * @code
        sessionPtr->insert("user name", userNameString);
        @endcode
+     * @note If the key already exists, the element is not inserted.
      */
-    void insert(const std::string &key, const any &obj)
+    void insert(const std::string &key, const std::any &obj)
     {
         std::lock_guard<std::mutex> lck(mutex_);
         sessionMap_.insert(std::make_pair(key, obj));
@@ -130,8 +164,9 @@ class Session
      * @code
        sessionPtr->insert("user name", userNameString);
        @endcode
+     * @note If the key already exists, the element is not inserted.
      */
-    void insert(const std::string &key, any &&obj)
+    void insert(const std::string &key, std::any &&obj)
     {
         std::lock_guard<std::mutex> lck(mutex_);
         sessionMap_.insert(std::make_pair(key, std::move(obj)));
@@ -147,7 +182,7 @@ class Session
     }
 
     /**
-     * @brief Retrun true if the data identified by the key exists.
+     * @brief Return true if the data identified by the key exists.
      */
     bool find(const std::string &key)
     {
@@ -187,6 +222,7 @@ class Session
         needToChange_ = true;
         needToSet_ = true;
     }
+
     Session() = delete;
 
   private:
@@ -197,6 +233,7 @@ class Session
     bool needToChange_{false};
     friend class SessionManager;
     friend class HttpAppFrameworkImpl;
+
     /**
      * @brief Constructor, usually called by the framework
      */
@@ -204,6 +241,7 @@ class Session
         : sessionId_(id), needToSet_(needToSet)
     {
     }
+
     /**
      * @brief Change the state of the session, usually called by the framework
      */
@@ -211,6 +249,7 @@ class Session
     {
         needToSet_ = false;
     }
+
     /**
      * @brief If the session ID needs to be changed.
      *
@@ -219,6 +258,7 @@ class Session
     {
         return needToChange_;
     }
+
     /**
      * @brief If the session ID needs to be set to the client through cookie,
      * return true
@@ -227,6 +267,7 @@ class Session
     {
         return needToSet_;
     }
+
     void setSessionId(const std::string &id)
     {
         std::lock_guard<std::mutex> lck(mutex_);

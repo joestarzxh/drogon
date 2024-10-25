@@ -10,6 +10,7 @@ using namespace drogon_ctl;
 
 #include "[[className]].h"
 <%c++
+std::vector<std::string> relationshipClassNames;
 auto &relationships=@@.get<std::vector<Relationship>>("relationships");
 auto rdbms=@@.get<std::string>("rdbms");
 for(auto &relationship : relationships)
@@ -23,22 +24,35 @@ for(auto &relationship : relationships)
         auto originalClassName=nameTransform(relationship.originalTableName(),true);
         if(relationshipClassName!=originalClassName)
         {
-%>
-#include "{%relationshipClassName%}.h"
-<%c++
+            relationshipClassNames.push_back(relationshipClassName);
         }
     }
     if(relationship.type() == Relationship::Type::ManyToMany)
     {
         auto &pivotTableName=relationship.pivotTable().tableName();
         auto pivotTableClassName=nameTransform(pivotTableName, true);
-%>
-#include "{%pivotTableClassName%}.h"
-<%c++
+        relationshipClassNames.push_back(pivotTableClassName);
     }
+}
+std::sort(relationshipClassNames.begin(), relationshipClassNames.end());
+relationshipClassNames.erase(std::unique(relationshipClassNames.begin(), relationshipClassNames.end()), relationshipClassNames.end());
+for(std::string &relationshipClassName : relationshipClassNames)
+{
+%>
+#include "{%relationshipClassName%}.h"
+<%c++
 }
 %>
 #include <drogon/utils/Utilities.h>
+<%c++
+auto &convertMethods=@@.get<std::vector<ConvertMethod>>("convertMethods");
+for(auto convertMethod : convertMethods ) {
+    for(auto i : convertMethod.includeFiles()) { %>
+<%c++ $$<<"#include "<<i<<"\n";%>
+<%c++
+	} //for
+} //for
+%>
 #include <string>
 <%c++
     const auto &cols=@@.get<std::vector<ColumnInfo>>("columns");
@@ -47,6 +61,7 @@ for(auto &relationship : relationships)
 %>
 
 using namespace drogon;
+using namespace drogon::orm;
 using namespace drogon_model::[[dbName]]<%c++
 auto &schema=@@.get<std::string>("schema");
 if(!schema.empty())
@@ -61,7 +76,7 @@ else
 
 <%c++for(auto col:cols){
 %>
-const std::string [[className]]::Cols::_{%col.colName_%} = "{%col.colName_%}";
+const std::string [[className]]::Cols::_{%col.colName_%} = "{%escapeIdentifier(col.colName_, rdbms)%}";
 <%c++
 }%>
 <%c++if(@@.get<int>("hasPrimaryKey")<=1){%>
@@ -87,7 +102,7 @@ if(!schema.empty())
 {
     $$<<schema<<".";
 }
-%>[[tableName]]";
+%>{%escapeIdentifier(@@.get<std::string>("tableName"), rdbms)%}";
 
 const std::vector<typename [[className]]::MetaData> [[className]]::metaData_={
 <%c++for(size_t i=0;i<cols.size();i++){
@@ -125,8 +140,12 @@ const std::string &[[className]]::getColumnName(size_t index) noexcept(false)
                 $$<<"            memset(&stm,0,sizeof(stm));\n";
                 $$<<"            strptime(daysStr.c_str(),\"%Y-%m-%d\",&stm);\n";
                 $$<<"            time_t t = mktime(&stm);\n";
- //               $$<<"            "<<col.colValName_<<"_=std::make_shared<::trantor::Date>(::trantor::Date(946656000000000).after(daysNum*86400));\n";
+//                $$<<"            "<<col.colValName_<<"_=std::make_shared<::trantor::Date>(::trantor::Date(946656000000000).after(daysNum*86400));\n";
                 $$<<"            "<<col.colValName_<<"_=std::make_shared<::trantor::Date>(t*1000000);\n";
+                auto convertMethod=std::find_if(convertMethods.begin(),convertMethods.end(),[col](const ConvertMethod& c){ return c.shouldConvert("*", col.colName_); });
+                if (convertMethod != convertMethods.end() && convertMethod->methodAfterDbRead() != "" ) {
+                    $$<<"            "<< convertMethod->methodAfterDbRead() << "(" << col.colValName_ << "_);\n";
+                } //endif
                 $$<<"        }\n";
                 continue;
             }
@@ -138,33 +157,49 @@ const std::string &[[className]]::getColumnName(size_t index) noexcept(false)
                 $$<<"            auto p = strptime(timeStr.c_str(),\"%Y-%m-%d %H:%M:%S\",&stm);\n";
                 $$<<"            time_t t = mktime(&stm);\n";
                 $$<<"            size_t decimalNum = 0;\n";
-                $$<<"            if(*p=='.')\n";
+                $$<<"            if(p)\n";
                 $$<<"            {\n";
-                $$<<"                std::string decimals(p+1,&timeStr[timeStr.length()]);\n";
-                $$<<"                while(decimals.length()<6)\n";
+                $$<<"                if(*p=='.')\n";
                 $$<<"                {\n";
-                $$<<"                    decimals += \"0\";\n";
+                $$<<"                    std::string decimals(p+1,&timeStr[timeStr.length()]);\n";
+                $$<<"                    while(decimals.length()<6)\n";
+                $$<<"                    {\n";
+                $$<<"                        decimals += \"0\";\n";
+                $$<<"                    }\n";
+                $$<<"                    decimalNum = (size_t)atol(decimals.c_str());\n";
                 $$<<"                }\n";
-                $$<<"                decimalNum = (size_t)atol(decimals.c_str());\n";
-                $$<<"            }\n";
  //               $$<<"            "<<col.colValName_<<"_=std::make_shared<::trantor::Date>(::trantor::Date(946656000000000).after(daysNum*86400));\n";
-                $$<<"            "<<col.colValName_<<"_=std::make_shared<::trantor::Date>(t*1000000+decimalNum);\n";
+                $$<<"                "<<col.colValName_<<"_=std::make_shared<::trantor::Date>(t*1000000+decimalNum);\n";
+                auto convertMethod=std::find_if(convertMethods.begin(),convertMethods.end(),[col](const ConvertMethod& c){return c.shouldConvert("*", col.colName_); });
+                if (convertMethod != convertMethods.end() && convertMethod->methodAfterDbRead() != "") {
+                    $$<<"            "<< convertMethod->methodAfterDbRead() << "(" << col.colValName_ << "_);\n";
+                } //endif
+                $$<<"            }\n";
                 $$<<"        }\n";
                 continue;
-            } 
+            }
             else if(col.colDatabaseType_=="bytea")
             {
-                $$<<"            auto str = r[\""<<col.colName_<<"\"].as<string_view>();\n";
+                $$<<"            auto str = r[\""<<col.colName_<<"\"].as<std::string_view>();\n";
                 $$<<"            if(str.length()>=2&&\n";
                 $$<<"                str[0]=='\\\\'&&str[1]=='x')\n";
                 $$<<"            {\n";
                 $$<<"                "<<col.colValName_<<"_=std::make_shared<std::vector<char>>(drogon::utils::hexToBinaryVector(str.data()+2,str.length()-2));\n";
+                auto convertMethod=std::find_if(convertMethods.begin(),convertMethods.end(),[col](const ConvertMethod& c){ return c.shouldConvert("*", col.colName_); });
+                if (convertMethod != convertMethods.end() && convertMethod->methodAfterDbRead() != "") {
+                    $$<<"            "<< convertMethod->methodAfterDbRead() << "(" << col.colValName_ << "_);\n";
+                } //endif
                 $$<<"            }\n";
                 $$<<"        }\n";
                 continue;
-            }           
+            }
 %>
             {%col.colValName_%}_=std::make_shared<{%col.colType_%}>(r["{%col.colName_%}"].as<{%col.colType_%}>());
+<%c++
+            auto convertMethod=std::find_if(convertMethods.begin(),convertMethods.end(),[col](const ConvertMethod& c){ return c.shouldConvert("*", col.colName_); });
+            if (convertMethod != convertMethods.end() && convertMethod->methodAfterDbRead() != "") {
+                $$<<"            "<< convertMethod->methodAfterDbRead() << "(" << col.colValName_ << "_);\n";
+            } //endif %>
         }
 <%c++}
 %>
@@ -198,6 +233,10 @@ const std::string &[[className]]::getColumnName(size_t index) noexcept(false)
                 $$<<"            time_t t = mktime(&stm);\n";
  //               $$<<"            "<<col.colValName_<<"_=std::make_shared<::trantor::Date>(::trantor::Date(946656000000000).after(daysNum*86400));\n";
                 $$<<"            "<<col.colValName_<<"_=std::make_shared<::trantor::Date>(t*1000000);\n";
+                auto convertMethod=std::find_if(convertMethods.begin(),convertMethods.end(),[col](const ConvertMethod& c){ return c.shouldConvert("*", col.colName_); });
+                if (convertMethod != convertMethods.end() && convertMethod->methodAfterDbRead() != "") {
+                    $$<<"            "<< convertMethod->methodAfterDbRead() << "(" << col.colValName_ << "_);\n";
+                } //endif
                 $$<<"        }\n";
                 continue;
             }
@@ -209,33 +248,49 @@ const std::string &[[className]]::getColumnName(size_t index) noexcept(false)
                 $$<<"            auto p = strptime(timeStr.c_str(),\"%Y-%m-%d %H:%M:%S\",&stm);\n";
                 $$<<"            time_t t = mktime(&stm);\n";
                 $$<<"            size_t decimalNum = 0;\n";
-                $$<<"            if(*p=='.')\n";
+                $$<<"            if(p)\n";
                 $$<<"            {\n";
-                $$<<"                std::string decimals(p+1,&timeStr[timeStr.length()]);\n";
-                $$<<"                while(decimals.length()<6)\n";
+                $$<<"                if(*p=='.')\n";
                 $$<<"                {\n";
-                $$<<"                    decimals += \"0\";\n";
+                $$<<"                    std::string decimals(p+1,&timeStr[timeStr.length()]);\n";
+                $$<<"                    while(decimals.length()<6)\n";
+                $$<<"                    {\n";
+                $$<<"                        decimals += \"0\";\n";
+                $$<<"                    }\n";
+                $$<<"                    decimalNum = (size_t)atol(decimals.c_str());\n";
                 $$<<"                }\n";
-                $$<<"                decimalNum = (size_t)atol(decimals.c_str());\n";
-                $$<<"            }\n";
  //               $$<<"            "<<col.colValName_<<"_=std::make_shared<::trantor::Date>(::trantor::Date(946656000000000).after(daysNum*86400));\n";
-                $$<<"            "<<col.colValName_<<"_=std::make_shared<::trantor::Date>(t*1000000+decimalNum);\n";
+                $$<<"                "<<col.colValName_<<"_=std::make_shared<::trantor::Date>(t*1000000+decimalNum);\n";
+                auto convertMethod=std::find_if(convertMethods.begin(),convertMethods.end(),[col](const ConvertMethod& c){ return c.shouldConvert("*", col.colName_); });
+                if (convertMethod != convertMethods.end() && convertMethod->methodAfterDbRead() != "") {
+                    $$<<"            "<< convertMethod->methodAfterDbRead() << "(" << col.colValName_ << "_);\n";
+                } //endif
+                $$<<"            }\n";
                 $$<<"        }\n";
                 continue;
-            } 
+            }
             else if(col.colDatabaseType_=="bytea")
             {
-                $$<<"            auto str = r[index].as<string_view>();\n";
+                $$<<"            auto str = r[index].as<std::string_view>();\n";
                 $$<<"            if(str.length()>=2&&\n";
                 $$<<"                str[0]=='\\\\'&&str[1]=='x')\n";
                 $$<<"            {\n";
                 $$<<"                "<<col.colValName_<<"_=std::make_shared<std::vector<char>>(drogon::utils::hexToBinaryVector(str.data()+2,str.length()-2));\n";
+                auto convertMethod=std::find_if(convertMethods.begin(),convertMethods.end(),[col](const ConvertMethod& c){ return c.shouldConvert("*", col.colName_); });
+                if (convertMethod != convertMethods.end() && convertMethod->methodAfterDbRead() != "") {
+                    $$<<"            "<< convertMethod->methodAfterDbRead() << "(" << col.colValName_ << "_);\n";
+                } //endif
                 $$<<"            }\n";
                 $$<<"        }\n";
                 continue;
-            }           
+            }
 %>
             {%col.colValName_%}_=std::make_shared<{%col.colType_%}>(r[index].as<{%col.colType_%}>());
+<%c++
+            auto convertMethod=std::find_if(convertMethods.begin(),convertMethods.end(),[col](const ConvertMethod& c){ return c.shouldConvert("*", col.colName_); });
+            if (convertMethod != convertMethods.end() && convertMethod->methodAfterDbRead() != "") {
+                $$<<"            "<< convertMethod->methodAfterDbRead() << "(" << col.colValName_ << "_);\n";
+            } //endif %>
         }
 <%c++}%>
     }
@@ -252,7 +307,7 @@ const std::string &[[className]]::getColumnName(size_t index) noexcept(false)
 <%c++
     for(size_t i=0; i<cols.size(); ++i)
     {
-        auto &col = cols[i];        
+        auto &col = cols[i];
         if(col.colType_.empty())
             continue;
 %>
@@ -265,6 +320,11 @@ const std::string &[[className]]::getColumnName(size_t index) noexcept(false)
                 $$<<"        if(!pJson[pMasqueradingVector["<<i<<"]].isNull())\n";
                 $$<<"        {\n";
                 $$<<"            "<<col.colValName_<<"_=std::make_shared<std::string>(pJson[pMasqueradingVector["<<i<<"]].asString());\n";
+                auto convertMethod=std::find_if(convertMethods.begin(),convertMethods.end(),[col](const ConvertMethod& c){ return c.shouldConvert("*", col.colName_); });
+                if (convertMethod != convertMethods.end() && convertMethod->methodBeforeDbWrite() != "") {
+                    $$<<"            "<< convertMethod->methodBeforeDbWrite() << "(" << col.colValName_ << "_);\n";
+                } //endif
+
                 $$<<"        }\n";
                 $$<<"    }\n";
                 continue;
@@ -280,6 +340,10 @@ const std::string &[[className]]::getColumnName(size_t index) noexcept(false)
                 $$<<"            time_t t = mktime(&stm);\n";
  //               $$<<"            "<<col.colValName_<<"_=std::make_shared<::trantor::Date>(::trantor::Date(946656000000000).after(daysNum*86400));\n";
                 $$<<"            "<<col.colValName_<<"_=std::make_shared<::trantor::Date>(t*1000000);\n";
+                auto convertMethod=std::find_if(convertMethods.begin(),convertMethods.end(),[col](const ConvertMethod& c){ return c.shouldConvert("*", col.colName_); });
+                if (convertMethod != convertMethods.end() && convertMethod->methodBeforeDbWrite() != "") {
+                    $$<<"            "<< convertMethod->methodBeforeDbWrite() << "(" << col.colValName_ << "_);\n";
+                } //endif
                 $$<<"        }\n";
                 $$<<"    }\n";
                 continue;
@@ -294,36 +358,51 @@ const std::string &[[className]]::getColumnName(size_t index) noexcept(false)
                 $$<<"            auto p = strptime(timeStr.c_str(),\"%Y-%m-%d %H:%M:%S\",&stm);\n";
                 $$<<"            time_t t = mktime(&stm);\n";
                 $$<<"            size_t decimalNum = 0;\n";
-                $$<<"            if(*p=='.')\n";
+                $$<<"            if(p)\n";
                 $$<<"            {\n";
-                $$<<"                std::string decimals(p+1,&timeStr[timeStr.length()]);\n";
-                $$<<"                while(decimals.length()<6)\n";
+                $$<<"                if(*p=='.')\n";
                 $$<<"                {\n";
-                $$<<"                    decimals += \"0\";\n";
+                $$<<"                    std::string decimals(p+1,&timeStr[timeStr.length()]);\n";
+                $$<<"                    while(decimals.length()<6)\n";
+                $$<<"                    {\n";
+                $$<<"                        decimals += \"0\";\n";
+                $$<<"                    }\n";
+                $$<<"                    decimalNum = (size_t)atol(decimals.c_str());\n";
                 $$<<"                }\n";
-                $$<<"                decimalNum = (size_t)atol(decimals.c_str());\n";
-                $$<<"            }\n";
  //               $$<<"            "<<col.colValName_<<"_=std::make_shared<::trantor::Date>(::trantor::Date(946656000000000).after(daysNum*86400));\n";
-                $$<<"            "<<col.colValName_<<"_=std::make_shared<::trantor::Date>(t*1000000+decimalNum);\n";
+                $$<<"                "<<col.colValName_<<"_=std::make_shared<::trantor::Date>(t*1000000+decimalNum);\n";
+                auto convertMethod=std::find_if(convertMethods.begin(),convertMethods.end(),[col](const ConvertMethod& c){ return c.shouldConvert("*", col.colName_); });
+                if (convertMethod != convertMethods.end() && convertMethod->methodBeforeDbWrite() != "") {
+                    $$<<"            "<< convertMethod->methodBeforeDbWrite() << "(" << col.colValName_ << "_);\n";
+                } //endif
+                $$<<"            }\n";
                 $$<<"        }\n";
                 $$<<"    }\n";
                 continue;
-            } 
+            }
             else if(col.colDatabaseType_=="bytea" || col.colDatabaseType_.find("blob") != std::string::npos)
             {
                 $$<<"        if(!pJson[pMasqueradingVector["<<i<<"]].isNull())\n";
                 $$<<"        {\n";
                 $$<<"            auto str = pJson[pMasqueradingVector["<<i<<"]].asString();\n";
                 $$<<"            "<<col.colValName_<<"_=std::make_shared<std::vector<char>>(drogon::utils::base64DecodeToVector(str));\n";
+                auto convertMethod=std::find_if(convertMethods.begin(),convertMethods.end(),[col](const ConvertMethod& c){ return c.shouldConvert("*", col.colName_); });
+                if (convertMethod != convertMethods.end() && convertMethod->methodBeforeDbWrite() != "") {
+                    $$<<"            "<< convertMethod->methodBeforeDbWrite() << "(" << col.colValName_ << "_);\n";
+                } //endif
                 $$<<"        }\n";
                 $$<<"    }\n";
                 continue;
-            } 
+            }
             else if(col.colType_.find("uint") == 0 || col.colType_ == "unsigned short")
             {
                 $$<<"        if(!pJson[pMasqueradingVector["<<i<<"]].isNull())\n";
                 $$<<"        {\n";
                 $$<<"            "<<col.colValName_<<"_=std::make_shared<"<<col.colType_<<">(("<<col.colType_<<")pJson[pMasqueradingVector["<<i<<"]].asUInt64());\n";
+                auto convertMethod=std::find_if(convertMethods.begin(),convertMethods.end(),[col](const ConvertMethod& c){ return c.shouldConvert("*", col.colName_); });
+                if (convertMethod != convertMethods.end() && convertMethod->methodBeforeDbWrite() != "") {
+                    $$<<"            "<< convertMethod->methodBeforeDbWrite() << "(" << col.colValName_ << "_);\n";
+                } //endif
                 $$<<"        }\n";
                 $$<<"    }\n";
                 continue;
@@ -333,6 +412,10 @@ const std::string &[[className]]::getColumnName(size_t index) noexcept(false)
                 $$<<"        if(!pJson[pMasqueradingVector["<<i<<"]].isNull())\n";
                 $$<<"        {\n";
                 $$<<"            "<<col.colValName_<<"_=std::make_shared<"<<col.colType_<<">(("<<col.colType_<<")pJson[pMasqueradingVector["<<i<<"]].asInt64());\n";
+                auto convertMethod=std::find_if(convertMethods.begin(),convertMethods.end(),[col](const ConvertMethod& c){ return c.shouldConvert("*", col.colName_); });
+                if (convertMethod != convertMethods.end() && convertMethod->methodBeforeDbWrite() != "") {
+                    $$<<"            "<< convertMethod->methodBeforeDbWrite() << "(" << col.colValName_ << "_);\n";
+                } //endif
                 $$<<"        }\n";
                 $$<<"    }\n";
                 continue;
@@ -342,6 +425,10 @@ const std::string &[[className]]::getColumnName(size_t index) noexcept(false)
                 $$<<"        if(!pJson[pMasqueradingVector["<<i<<"]].isNull())\n";
                 $$<<"        {\n";
                 $$<<"            "<<col.colValName_<<"_=std::make_shared<float>(pJson[pMasqueradingVector["<<i<<"]].asFloat());\n";
+                auto convertMethod=std::find_if(convertMethods.begin(),convertMethods.end(),[col](const ConvertMethod& c){ return c.shouldConvert("*", col.colName_); });
+                if (convertMethod != convertMethods.end() && convertMethod->methodBeforeDbWrite() != "") {
+                    $$<<"            "<< convertMethod->methodBeforeDbWrite() << "(" << col.colValName_ << "_);\n";
+                } //endif
                 $$<<"        }\n";
                 $$<<"     }\n";
                 continue;
@@ -351,6 +438,10 @@ const std::string &[[className]]::getColumnName(size_t index) noexcept(false)
                 $$<<"        if(!pJson[pMasqueradingVector["<<i<<"]].isNull())\n";
                 $$<<"        {\n";
                 $$<<"            "<<col.colValName_<<"_=std::make_shared<double>(pJson[pMasqueradingVector["<<i<<"]].asDouble());\n";
+                auto convertMethod=std::find_if(convertMethods.begin(),convertMethods.end(),[col](const ConvertMethod& c){ return c.shouldConvert("*", col.colName_); });
+                if (convertMethod != convertMethods.end() && convertMethod->methodBeforeDbWrite() != "") {
+                    $$<<"            "<< convertMethod->methodBeforeDbWrite() << "(" << col.colValName_ << "_);\n";
+                } //endif
                 $$<<"        }\n";
                 $$<<"    }\n";
                 continue;
@@ -360,13 +451,17 @@ const std::string &[[className]]::getColumnName(size_t index) noexcept(false)
                 $$<<"        if(!pJson[pMasqueradingVector["<<i<<"]].isNull())\n";
                 $$<<"        {\n";
                 $$<<"            "<<col.colValName_<<"_=std::make_shared<bool>(pJson[pMasqueradingVector["<<i<<"]].asBool());\n";
+                auto convertMethod=std::find_if(convertMethods.begin(),convertMethods.end(),[col](const ConvertMethod& c){ return c.shouldConvert("*", col.colName_); });
+                if (convertMethod != convertMethods.end() && convertMethod->methodBeforeDbWrite() != "") {
+                    $$<<"            "<< convertMethod->methodBeforeDbWrite() << "(" << col.colValName_ << "_);\n";
+                } //endif
                 $$<<"        }\n";
                 $$<<"    }\n";
                 continue;
-            }      
+            }
 %>
         }
-<%c++   
+<%c++
     }
 %>
 }
@@ -389,6 +484,10 @@ const std::string &[[className]]::getColumnName(size_t index) noexcept(false)
                 $$<<"        if(!pJson[\""<<col.colName_<<"\"].isNull())\n";
                 $$<<"        {\n";
                 $$<<"            "<<col.colValName_<<"_=std::make_shared<std::string>(pJson[\""<<col.colName_<<"\"].asString());\n";
+                auto convertMethod=std::find_if(convertMethods.begin(),convertMethods.end(),[col](const ConvertMethod& c){ return c.shouldConvert("*", col.colName_); });
+                if (convertMethod != convertMethods.end() && convertMethod->methodBeforeDbWrite() != "") {
+                    $$<<"            "<< convertMethod->methodBeforeDbWrite() << "(" << col.colValName_ << "_);\n";
+                } //endif
                 $$<<"        }\n";
                 $$<<"    }\n";
                 continue;
@@ -404,6 +503,10 @@ const std::string &[[className]]::getColumnName(size_t index) noexcept(false)
                 $$<<"            time_t t = mktime(&stm);\n";
  //               $$<<"            "<<col.colValName_<<"_=std::make_shared<::trantor::Date>(::trantor::Date(946656000000000).after(daysNum*86400));\n";
                 $$<<"            "<<col.colValName_<<"_=std::make_shared<::trantor::Date>(t*1000000);\n";
+                auto convertMethod=std::find_if(convertMethods.begin(),convertMethods.end(),[col](const ConvertMethod& c){ return c.shouldConvert("*", col.colName_); });
+                if (convertMethod != convertMethods.end() && convertMethod->methodBeforeDbWrite() != "") {
+                    $$<<"            "<< convertMethod->methodBeforeDbWrite() << "(" << col.colValName_ << "_);\n";
+                } //endif
                 $$<<"        }\n";
                 $$<<"    }\n";
                 continue;
@@ -418,37 +521,52 @@ const std::string &[[className]]::getColumnName(size_t index) noexcept(false)
                 $$<<"            auto p = strptime(timeStr.c_str(),\"%Y-%m-%d %H:%M:%S\",&stm);\n";
                 $$<<"            time_t t = mktime(&stm);\n";
                 $$<<"            size_t decimalNum = 0;\n";
-                $$<<"            if(*p=='.')\n";
+                $$<<"            if(p)\n";
                 $$<<"            {\n";
-                $$<<"                std::string decimals(p+1,&timeStr[timeStr.length()]);\n";
-                $$<<"                while(decimals.length()<6)\n";
+                $$<<"                if(*p=='.')\n";
                 $$<<"                {\n";
-                $$<<"                    decimals += \"0\";\n";
+                $$<<"                    std::string decimals(p+1,&timeStr[timeStr.length()]);\n";
+                $$<<"                    while(decimals.length()<6)\n";
+                $$<<"                    {\n";
+                $$<<"                        decimals += \"0\";\n";
+                $$<<"                    }\n";
+                $$<<"                    decimalNum = (size_t)atol(decimals.c_str());\n";
                 $$<<"                }\n";
-                $$<<"                decimalNum = (size_t)atol(decimals.c_str());\n";
-                $$<<"            }\n";
  //               $$<<"            "<<col.colValName_<<"_=std::make_shared<::trantor::Date>(::trantor::Date(946656000000000).after(daysNum*86400));\n";
-                $$<<"            "<<col.colValName_<<"_=std::make_shared<::trantor::Date>(t*1000000+decimalNum);\n";
-                 $$<<"        }\n";               
+                $$<<"                "<<col.colValName_<<"_=std::make_shared<::trantor::Date>(t*1000000+decimalNum);\n";
+                auto convertMethod=std::find_if(convertMethods.begin(),convertMethods.end(),[col](const ConvertMethod& c){ return c.shouldConvert("*", col.colName_); });
+                if (convertMethod != convertMethods.end() && convertMethod->methodBeforeDbWrite() != "") {
+                    $$<<"            "<< convertMethod->methodBeforeDbWrite() << "(" << col.colValName_ << "_);\n";
+                } //endif
+                $$<<"            }\n";
+                 $$<<"        }\n";
                 $$<<"    }\n";
                 continue;
-            } 
+            }
             else if(col.colDatabaseType_=="bytea" || col.colDatabaseType_.find("blob") != std::string::npos)
             {
                 $$<<"        if(!pJson[\""<<col.colName_<<"\"].isNull())\n";
                 $$<<"        {\n";
                 $$<<"            auto str = pJson[\""<<col.colName_<<"\"].asString();\n";
                 $$<<"            "<<col.colValName_<<"_=std::make_shared<std::vector<char>>(drogon::utils::base64DecodeToVector(str));\n";
-                $$<<"        }\n";                
+                auto convertMethod=std::find_if(convertMethods.begin(),convertMethods.end(),[col](const ConvertMethod& c){ return c.shouldConvert("*", col.colName_); });
+                if (convertMethod != convertMethods.end() && convertMethod->methodBeforeDbWrite() != "") {
+                    $$<<"            "<< convertMethod->methodBeforeDbWrite() << "(" << col.colValName_ << "_);\n";
+                } //endif
+                $$<<"        }\n";
                 $$<<"    }\n";
                 continue;
-            } 
+            }
             else if(col.colType_.find("uint") == 0 || col.colType_ == "unsigned short")
             {
                 $$<<"        if(!pJson[\""<<col.colName_<<"\"].isNull())\n";
                 $$<<"        {\n";
                 $$<<"            "<<col.colValName_<<"_=std::make_shared<"<<col.colType_<<">(("<<col.colType_<<")pJson[\""<<col.colName_<<"\"].asUInt64());\n";
-                $$<<"        }\n";                 
+                auto convertMethod=std::find_if(convertMethods.begin(),convertMethods.end(),[col](const ConvertMethod& c){ return c.shouldConvert("*", col.colName_); });
+                if (convertMethod != convertMethods.end() && convertMethod->methodBeforeDbWrite() != "") {
+                    $$<<"            "<< convertMethod->methodBeforeDbWrite() << "(" << col.colValName_ << "_);\n";
+                } //endif
+                $$<<"        }\n";
                 $$<<"    }\n";
                 continue;
             }
@@ -457,7 +575,11 @@ const std::string &[[className]]::getColumnName(size_t index) noexcept(false)
                 $$<<"        if(!pJson[\""<<col.colName_<<"\"].isNull())\n";
                 $$<<"        {\n";
                 $$<<"            "<<col.colValName_<<"_=std::make_shared<"<<col.colType_<<">(("<<col.colType_<<")pJson[\""<<col.colName_<<"\"].asInt64());\n";
-                $$<<"        }\n";                  
+                auto convertMethod=std::find_if(convertMethods.begin(),convertMethods.end(),[col](const ConvertMethod& c){ return c.shouldConvert("*", col.colName_); });
+                if (convertMethod != convertMethods.end() && convertMethod->methodBeforeDbWrite() != "") {
+                    $$<<"            "<< convertMethod->methodBeforeDbWrite() << "(" << col.colValName_ << "_);\n";
+                } //endif
+                $$<<"        }\n";
                 $$<<"    }\n";
                 continue;
             }
@@ -466,7 +588,11 @@ const std::string &[[className]]::getColumnName(size_t index) noexcept(false)
                 $$<<"        if(!pJson[\""<<col.colName_<<"\"].isNull())\n";
                 $$<<"        {\n";
                 $$<<"            "<<col.colValName_<<"_=std::make_shared<float>(pJson[\""<<col.colName_<<"\"].asFloat());\n";
-                $$<<"        }\n";                 
+                auto convertMethod=std::find_if(convertMethods.begin(),convertMethods.end(),[col](const ConvertMethod& c){ return c.shouldConvert("*", col.colName_); });
+                if (convertMethod != convertMethods.end() && convertMethod->methodBeforeDbWrite() != "") {
+                    $$<<"            "<< convertMethod->methodBeforeDbWrite() << "(" << col.colValName_ << "_);\n";
+                } //endif
+                $$<<"        }\n";
                 $$<<"     }\n";
                 continue;
             }
@@ -475,7 +601,11 @@ const std::string &[[className]]::getColumnName(size_t index) noexcept(false)
                 $$<<"        if(!pJson[\""<<col.colName_<<"\"].isNull())\n";
                 $$<<"        {\n";
                 $$<<"            "<<col.colValName_<<"_=std::make_shared<double>(pJson[\""<<col.colName_<<"\"].asDouble());\n";
-                $$<<"        }\n";                 
+                auto convertMethod=std::find_if(convertMethods.begin(),convertMethods.end(),[col](const ConvertMethod& c){ return c.shouldConvert("*", col.colName_); });
+                if (convertMethod != convertMethods.end() && convertMethod->methodBeforeDbWrite() != "") {
+                    $$<<"            "<< convertMethod->methodBeforeDbWrite() << "(" << col.colValName_ << "_);\n";
+                } //endif
+                $$<<"        }\n";
                 $$<<"    }\n";
                 continue;
             }
@@ -484,10 +614,14 @@ const std::string &[[className]]::getColumnName(size_t index) noexcept(false)
                 $$<<"        if(!pJson[\""<<col.colName_<<"\"].isNull())\n";
                 $$<<"        {\n";
                 $$<<"            "<<col.colValName_<<"_=std::make_shared<bool>(pJson[\""<<col.colName_<<"\"].asBool());\n";
-                $$<<"        }\n";  
+                auto convertMethod=std::find_if(convertMethods.begin(),convertMethods.end(),[col](const ConvertMethod& c){ return c.shouldConvert("*", col.colName_); });
+                if (convertMethod != convertMethods.end() && convertMethod->methodBeforeDbWrite() != "") {
+                    $$<<"            "<< convertMethod->methodBeforeDbWrite() << "(" << col.colValName_ << "_);\n";
+                } //endif
+                $$<<"        }\n";
                 $$<<"    }\n";
                 continue;
-            }      
+            }
 %>
     }
 <%c++
@@ -522,6 +656,10 @@ void [[className]]::updateByMasqueradedJson(const Json::Value &pJson,
                 $$<<"        if(!pJson[pMasqueradingVector["<<i<<"]].isNull())\n";
                 $$<<"        {\n";
                 $$<<"            "<<col.colValName_<<"_=std::make_shared<std::string>(pJson[pMasqueradingVector["<<i<<"]].asString());\n";
+                auto convertMethod=std::find_if(convertMethods.begin(),convertMethods.end(),[col](const ConvertMethod& c){ return c.shouldConvert("*", col.colName_); });
+                if (convertMethod != convertMethods.end() && convertMethod->methodBeforeDbWrite() != "") {
+                    $$<<"            "<< convertMethod->methodBeforeDbWrite() << "(" << col.colValName_ << "_);\n";
+                } //endif
                 $$<<"        }\n";
                 $$<<"    }\n";
                 continue;
@@ -537,6 +675,10 @@ void [[className]]::updateByMasqueradedJson(const Json::Value &pJson,
                 $$<<"            time_t t = mktime(&stm);\n";
  //               $$<<"            "<<col.colValName_<<"_=std::make_shared<::trantor::Date>(::trantor::Date(946656000000000).after(daysNum*86400));\n";
                 $$<<"            "<<col.colValName_<<"_=std::make_shared<::trantor::Date>(t*1000000);\n";
+                auto convertMethod=std::find_if(convertMethods.begin(),convertMethods.end(),[col](const ConvertMethod& c){ return c.shouldConvert("*", col.colName_); });
+                if (convertMethod != convertMethods.end() && convertMethod->methodBeforeDbWrite() != "") {
+                    $$<<"            "<< convertMethod->methodBeforeDbWrite() << "(" << col.colValName_ << "_);\n";
+                } //endif
                 $$<<"        }\n";
                 $$<<"    }\n";
                 continue;
@@ -551,36 +693,51 @@ void [[className]]::updateByMasqueradedJson(const Json::Value &pJson,
                 $$<<"            auto p = strptime(timeStr.c_str(),\"%Y-%m-%d %H:%M:%S\",&stm);\n";
                 $$<<"            time_t t = mktime(&stm);\n";
                 $$<<"            size_t decimalNum = 0;\n";
-                $$<<"            if(*p=='.')\n";
+                $$<<"            if(p)\n";
                 $$<<"            {\n";
-                $$<<"                std::string decimals(p+1,&timeStr[timeStr.length()]);\n";
-                $$<<"                while(decimals.length()<6)\n";
+                $$<<"                if(*p=='.')\n";
                 $$<<"                {\n";
-                $$<<"                    decimals += \"0\";\n";
+                $$<<"                    std::string decimals(p+1,&timeStr[timeStr.length()]);\n";
+                $$<<"                    while(decimals.length()<6)\n";
+                $$<<"                    {\n";
+                $$<<"                        decimals += \"0\";\n";
+                $$<<"                    }\n";
+                $$<<"                    decimalNum = (size_t)atol(decimals.c_str());\n";
                 $$<<"                }\n";
-                $$<<"                decimalNum = (size_t)atol(decimals.c_str());\n";
-                $$<<"            }\n";
  //               $$<<"            "<<col.colValName_<<"_=std::make_shared<::trantor::Date>(::trantor::Date(946656000000000).after(daysNum*86400));\n";
-                $$<<"            "<<col.colValName_<<"_=std::make_shared<::trantor::Date>(t*1000000+decimalNum);\n";
+                $$<<"                "<<col.colValName_<<"_=std::make_shared<::trantor::Date>(t*1000000+decimalNum);\n";
+                auto convertMethod=std::find_if(convertMethods.begin(),convertMethods.end(),[col](const ConvertMethod& c){ return c.shouldConvert("*", col.colName_); });
+                if (convertMethod != convertMethods.end() && convertMethod->methodBeforeDbWrite() != "") {
+                    $$<<"            "<< convertMethod->methodBeforeDbWrite() << "(" << col.colValName_ << "_);\n";
+                } //endif
+                $$<<"            }\n";
                 $$<<"        }\n";
                 $$<<"    }\n";
                 continue;
-            } 
+            }
             else if(col.colDatabaseType_=="bytea" || col.colDatabaseType_.find("blob") != std::string::npos)
             {
                 $$<<"        if(!pJson[pMasqueradingVector["<<i<<"]].isNull())\n";
                 $$<<"        {\n";
                 $$<<"            auto str = pJson[pMasqueradingVector["<<i<<"]].asString();\n";
                 $$<<"            "<<col.colValName_<<"_=std::make_shared<std::vector<char>>(drogon::utils::base64DecodeToVector(str));\n";
+                auto convertMethod=std::find_if(convertMethods.begin(),convertMethods.end(),[col](const ConvertMethod& c){ return c.shouldConvert("*", col.colName_); });
+                if (convertMethod != convertMethods.end() && convertMethod->methodBeforeDbWrite() != "") {
+                    $$<<"            "<< convertMethod->methodBeforeDbWrite() << "(" << col.colValName_ << "_);\n";
+                } //endif
                 $$<<"        }\n";
                 $$<<"    }\n";
                 continue;
-            } 
+            }
             else if(col.colType_.find("uint") == 0 || col.colType_ == "unsigned short")
             {
                 $$<<"        if(!pJson[pMasqueradingVector["<<i<<"]].isNull())\n";
                 $$<<"        {\n";
                 $$<<"            "<<col.colValName_<<"_=std::make_shared<"<<col.colType_<<">(("<<col.colType_<<")pJson[pMasqueradingVector["<<i<<"]].asUInt64());\n";
+                auto convertMethod=std::find_if(convertMethods.begin(),convertMethods.end(),[col](const ConvertMethod& c){ return c.shouldConvert("*", col.colName_); });
+                if (convertMethod != convertMethods.end() && convertMethod->methodBeforeDbWrite() != "") {
+                    $$<<"            "<< convertMethod->methodBeforeDbWrite() << "(" << col.colValName_ << "_);\n";
+                } //endif
                 $$<<"        }\n";
                 $$<<"    }\n";
                 continue;
@@ -590,6 +747,10 @@ void [[className]]::updateByMasqueradedJson(const Json::Value &pJson,
                 $$<<"        if(!pJson[pMasqueradingVector["<<i<<"]].isNull())\n";
                 $$<<"        {\n";
                 $$<<"            "<<col.colValName_<<"_=std::make_shared<"<<col.colType_<<">(("<<col.colType_<<")pJson[pMasqueradingVector["<<i<<"]].asInt64());\n";
+                auto convertMethod=std::find_if(convertMethods.begin(),convertMethods.end(),[col](const ConvertMethod& c){ return c.shouldConvert("*", col.colName_); });
+                if (convertMethod != convertMethods.end() && convertMethod->methodBeforeDbWrite() != "") {
+                    $$<<"            "<< convertMethod->methodBeforeDbWrite() << "(" << col.colValName_ << "_);\n";
+                } //endif
                 $$<<"        }\n";
                 $$<<"    }\n";
                 continue;
@@ -599,6 +760,10 @@ void [[className]]::updateByMasqueradedJson(const Json::Value &pJson,
                 $$<<"        if(!pJson[pMasqueradingVector["<<i<<"]].isNull())\n";
                 $$<<"        {\n";
                 $$<<"            "<<col.colValName_<<"_=std::make_shared<float>(pJson[pMasqueradingVector["<<i<<"]].asFloat());\n";
+                auto convertMethod=std::find_if(convertMethods.begin(),convertMethods.end(),[col](const ConvertMethod& c){ return c.shouldConvert("*", col.colName_); });
+                if (convertMethod != convertMethods.end() && convertMethod->methodBeforeDbWrite() != "") {
+                    $$<<"            "<< convertMethod->methodBeforeDbWrite() << "(" << col.colValName_ << "_);\n";
+                } //endif
                 $$<<"        }\n";
                 $$<<"    }\n";
                 continue;
@@ -608,6 +773,10 @@ void [[className]]::updateByMasqueradedJson(const Json::Value &pJson,
                 $$<<"        if(!pJson[pMasqueradingVector["<<i<<"]].isNull())\n";
                 $$<<"        {\n";
                 $$<<"            "<<col.colValName_<<"_=std::make_shared<double>(pJson[pMasqueradingVector["<<i<<"]].asDouble());\n";
+                auto convertMethod=std::find_if(convertMethods.begin(),convertMethods.end(),[col](const ConvertMethod& c){ return c.shouldConvert("*", col.colName_); });
+                if (convertMethod != convertMethods.end() && convertMethod->methodBeforeDbWrite() != "") {
+                    $$<<"            "<< convertMethod->methodBeforeDbWrite() << "(" << col.colValName_ << "_);\n";
+                } //endif
                 $$<<"        }\n";
                 $$<<"    }\n";
                 continue;
@@ -617,17 +786,21 @@ void [[className]]::updateByMasqueradedJson(const Json::Value &pJson,
                 $$<<"        if(!pJson[pMasqueradingVector["<<i<<"]].isNull())\n";
                 $$<<"        {\n";
                 $$<<"            "<<col.colValName_<<"_=std::make_shared<bool>(pJson[pMasqueradingVector["<<i<<"]].asBool());\n";
+                auto convertMethod=std::find_if(convertMethods.begin(),convertMethods.end(),[col](const ConvertMethod& c){ return c.shouldConvert("*", col.colName_); });
+                if (convertMethod != convertMethods.end() && convertMethod->methodBeforeDbWrite() != "") {
+                    $$<<"            "<< convertMethod->methodBeforeDbWrite() << "(" << col.colValName_ << "_);\n";
+                } //endif
                 $$<<"        }\n";
                 $$<<"    }\n";
                 continue;
-            }      
+            }
 %>
         }
 <%c++
     }
     %>
 }
-                                                                    
+
 void [[className]]::updateByJson(const Json::Value &pJson) noexcept(false)
 {
 <%c++
@@ -649,6 +822,10 @@ void [[className]]::updateByJson(const Json::Value &pJson) noexcept(false)
                 $$<<"        if(!pJson[\""<<col.colName_<<"\"].isNull())\n";
                 $$<<"        {\n";
                 $$<<"            "<<col.colValName_<<"_=std::make_shared<std::string>(pJson[\""<<col.colName_<<"\"].asString());\n";
+                auto convertMethod=std::find_if(convertMethods.begin(),convertMethods.end(),[col](const ConvertMethod& c){ return c.shouldConvert("*", col.colName_); });
+                if (convertMethod != convertMethods.end() && convertMethod->methodBeforeDbWrite() != "") {
+                    $$<<"            "<< convertMethod->methodBeforeDbWrite() << "(" << col.colValName_ << "_);\n";
+                } //endif
                 $$<<"        }\n";
                 $$<<"    }\n";
                 continue;
@@ -664,6 +841,10 @@ void [[className]]::updateByJson(const Json::Value &pJson) noexcept(false)
                 $$<<"            time_t t = mktime(&stm);\n";
  //               $$<<"            "<<col.colValName_<<"_=std::make_shared<::trantor::Date>(::trantor::Date(946656000000000).after(daysNum*86400));\n";
                 $$<<"            "<<col.colValName_<<"_=std::make_shared<::trantor::Date>(t*1000000);\n";
+                auto convertMethod=std::find_if(convertMethods.begin(),convertMethods.end(),[col](const ConvertMethod& c){ return c.shouldConvert("*", col.colName_); });
+                if (convertMethod != convertMethods.end() && convertMethod->methodBeforeDbWrite() != "") {
+                    $$<<"            "<< convertMethod->methodBeforeDbWrite() << "(" << col.colValName_ << "_);\n";
+                } //endif
                 $$<<"        }\n";
                 $$<<"    }\n";
                 continue;
@@ -678,36 +859,51 @@ void [[className]]::updateByJson(const Json::Value &pJson) noexcept(false)
                 $$<<"            auto p = strptime(timeStr.c_str(),\"%Y-%m-%d %H:%M:%S\",&stm);\n";
                 $$<<"            time_t t = mktime(&stm);\n";
                 $$<<"            size_t decimalNum = 0;\n";
-                $$<<"            if(*p=='.')\n";
+                $$<<"            if(p)\n";
                 $$<<"            {\n";
-                $$<<"                std::string decimals(p+1,&timeStr[timeStr.length()]);\n";
-                $$<<"                while(decimals.length()<6)\n";
+                $$<<"                if(*p=='.')\n";
                 $$<<"                {\n";
-                $$<<"                    decimals += \"0\";\n";
+                $$<<"                    std::string decimals(p+1,&timeStr[timeStr.length()]);\n";
+                $$<<"                    while(decimals.length()<6)\n";
+                $$<<"                    {\n";
+                $$<<"                        decimals += \"0\";\n";
+                $$<<"                    }\n";
+                $$<<"                    decimalNum = (size_t)atol(decimals.c_str());\n";
                 $$<<"                }\n";
-                $$<<"                decimalNum = (size_t)atol(decimals.c_str());\n";
-                $$<<"            }\n";
  //               $$<<"            "<<col.colValName_<<"_=std::make_shared<::trantor::Date>(::trantor::Date(946656000000000).after(daysNum*86400));\n";
-                $$<<"            "<<col.colValName_<<"_=std::make_shared<::trantor::Date>(t*1000000+decimalNum);\n";
+                $$<<"                "<<col.colValName_<<"_=std::make_shared<::trantor::Date>(t*1000000+decimalNum);\n";
+                auto convertMethod=std::find_if(convertMethods.begin(),convertMethods.end(),[col](const ConvertMethod& c){ return c.shouldConvert("*", col.colName_); });
+                if (convertMethod != convertMethods.end() && convertMethod->methodBeforeDbWrite() != "") {
+                    $$<<"            "<< convertMethod->methodBeforeDbWrite() << "(" << col.colValName_ << "_);\n";
+                } //endif
+                $$<<"            }\n";
                 $$<<"        }\n";
                 $$<<"    }\n";
                 continue;
-            } 
+            }
             else if(col.colDatabaseType_=="bytea" || col.colDatabaseType_.find("blob") != std::string::npos)
             {
                 $$<<"        if(!pJson[\""<<col.colName_<<"\"].isNull())\n";
                 $$<<"        {\n";
                 $$<<"            auto str = pJson[\""<<col.colName_<<"\"].asString();\n";
                 $$<<"            "<<col.colValName_<<"_=std::make_shared<std::vector<char>>(drogon::utils::base64DecodeToVector(str));\n";
+                auto convertMethod=std::find_if(convertMethods.begin(),convertMethods.end(),[col](const ConvertMethod& c){ return c.shouldConvert("*", col.colName_); });
+                if (convertMethod != convertMethods.end() && convertMethod->methodBeforeDbWrite() != "") {
+                    $$<<"            "<< convertMethod->methodBeforeDbWrite() << "(" << col.colValName_ << "_);\n";
+                } //endif
                 $$<<"        }\n";
                 $$<<"    }\n";
                 continue;
-            } 
+            }
             else if(col.colType_.find("uint") == 0 || col.colType_ == "unsigned short")
             {
                 $$<<"        if(!pJson[\""<<col.colName_<<"\"].isNull())\n";
                 $$<<"        {\n";
                 $$<<"            "<<col.colValName_<<"_=std::make_shared<"<<col.colType_<<">(("<<col.colType_<<")pJson[\""<<col.colName_<<"\"].asUInt64());\n";
+                auto convertMethod=std::find_if(convertMethods.begin(),convertMethods.end(),[col](const ConvertMethod& c){ return c.shouldConvert("*", col.colName_); });
+                if (convertMethod != convertMethods.end() && convertMethod->methodBeforeDbWrite() != "") {
+                    $$<<"            "<< convertMethod->methodBeforeDbWrite() << "(" << col.colValName_ << "_);\n";
+                } //endif
                 $$<<"        }\n";
                 $$<<"    }\n";
                 continue;
@@ -717,6 +913,10 @@ void [[className]]::updateByJson(const Json::Value &pJson) noexcept(false)
                 $$<<"        if(!pJson[\""<<col.colName_<<"\"].isNull())\n";
                 $$<<"        {\n";
                 $$<<"            "<<col.colValName_<<"_=std::make_shared<"<<col.colType_<<">(("<<col.colType_<<")pJson[\""<<col.colName_<<"\"].asInt64());\n";
+                auto convertMethod=std::find_if(convertMethods.begin(),convertMethods.end(),[col](const ConvertMethod& c){ return c.shouldConvert("*", col.colName_); });
+                if (convertMethod != convertMethods.end() && convertMethod->methodBeforeDbWrite() != "") {
+                    $$<<"            "<< convertMethod->methodBeforeDbWrite() << "(" << col.colValName_ << "_);\n";
+                } //endif
                 $$<<"        }\n";
                 $$<<"    }\n";
                 continue;
@@ -726,6 +926,10 @@ void [[className]]::updateByJson(const Json::Value &pJson) noexcept(false)
                 $$<<"        if(!pJson[\""<<col.colName_<<"\"].isNull())\n";
                 $$<<"        {\n";
                 $$<<"            "<<col.colValName_<<"_=std::make_shared<float>(pJson[\""<<col.colName_<<"\"].asFloat());\n";
+                auto convertMethod=std::find_if(convertMethods.begin(),convertMethods.end(),[col](const ConvertMethod& c){ return c.shouldConvert("*", col.colName_); });
+                if (convertMethod != convertMethods.end() && convertMethod->methodBeforeDbWrite() != "") {
+                    $$<<"            "<< convertMethod->methodBeforeDbWrite() << "(" << col.colValName_ << "_);\n";
+                } //endif
                 $$<<"        }\n";
                 $$<<"    }\n";
                 continue;
@@ -735,6 +939,10 @@ void [[className]]::updateByJson(const Json::Value &pJson) noexcept(false)
                 $$<<"        if(!pJson[\""<<col.colName_<<"\"].isNull())\n";
                 $$<<"        {\n";
                 $$<<"            "<<col.colValName_<<"_=std::make_shared<double>(pJson[\""<<col.colName_<<"\"].asDouble());\n";
+                auto convertMethod=std::find_if(convertMethods.begin(),convertMethods.end(),[col](const ConvertMethod& c){ return c.shouldConvert("*", col.colName_); });
+                if (convertMethod != convertMethods.end() && convertMethod->methodBeforeDbWrite() != "") {
+                    $$<<"            "<< convertMethod->methodBeforeDbWrite() << "(" << col.colValName_ << "_);\n";
+                } //endif
                 $$<<"        }\n";
                 $$<<"    }\n";
                 continue;
@@ -744,10 +952,14 @@ void [[className]]::updateByJson(const Json::Value &pJson) noexcept(false)
                 $$<<"        if(!pJson[\""<<col.colName_<<"\"].isNull())\n";
                 $$<<"        {\n";
                 $$<<"            "<<col.colValName_<<"_=std::make_shared<bool>(pJson[\""<<col.colName_<<"\"].asBool());\n";
+                auto convertMethod=std::find_if(convertMethods.begin(),convertMethods.end(),[col](const ConvertMethod& c){ return c.shouldConvert("*", col.colName_); });
+                if (convertMethod != convertMethods.end() && convertMethod->methodBeforeDbWrite() != "") {
+                    $$<<"            "<< convertMethod->methodBeforeDbWrite() << "(" << col.colValName_ << "_);\n";
+                } //endif
                 $$<<"        }\n";
                 $$<<"    }\n";
                 continue;
-            }      
+            }
 %>
         }
 <%c++
@@ -763,7 +975,7 @@ void [[className]]::updateByJson(const Json::Value &pJson) noexcept(false)
         {
             $$<<"const "<<col.colType_<<" &"<<className<<"::getValueOf"<<col.colTypeName_<<"() const noexcept\n";
             $$<<"{\n";
-            $$<<"    const static "<<col.colType_<<" defaultValue = "<<col.colType_<<"();\n";
+            $$<<"    static const "<<col.colType_<<" defaultValue = "<<col.colType_<<"();\n";
             $$<<"    if("<<col.colValName_<<"_)\n";
             $$<<"        return *"<<col.colValName_<<"_;\n";
             $$<<"    return defaultValue;\n";
@@ -772,7 +984,7 @@ void [[className]]::updateByJson(const Json::Value &pJson) noexcept(false)
             {
                 $$<<"std::string "<<className<<"::getValueOf"<<col.colTypeName_<<"AsString() const noexcept\n";
                 $$<<"{\n";
-                $$<<"    const static std::string defaultValue = std::string();\n";
+                $$<<"    static const std::string defaultValue = std::string();\n";
                 $$<<"    if("<<col.colValName_<<"_)\n";
                 $$<<"        return std::string("<<col.colValName_<<"_->data(),"<<col.colValName_<<"_->size());\n";
                 $$<<"    return defaultValue;\n";
@@ -782,7 +994,7 @@ void [[className]]::updateByJson(const Json::Value &pJson) noexcept(false)
             $$<<"{\n";
             $$<<"    return "<<col.colValName_<<"_;\n";
             $$<<"}\n";
- 
+
                 $$<<"void "<<className<<"::set"<<col.colTypeName_<<"(const "<<col.colType_<<" &p"<<col.colTypeName_<<") noexcept\n";
                 $$<<"{\n";
                 if(col.colDatabaseType_=="date")
@@ -795,7 +1007,7 @@ void [[className]]::updateByJson(const Json::Value &pJson) noexcept(false)
                 }
                 $$<<"    dirtyFlag_["<<i<<"] = true;\n";
                 $$<<"}\n";
-                
+
                 if(col.colType_=="std::string")
                 {
                     $$<<"void "<<className<<"::set"<<col.colTypeName_<<"("<<col.colType_<<" &&p"<<col.colTypeName_<<") noexcept\n";
@@ -832,7 +1044,7 @@ void [[className]]::updateByJson(const Json::Value &pJson) noexcept(false)
                 $$<<"}\n";
             }
         }
-        $$<<"\n";    
+        $$<<"\n";
     }
     if(@@.get<std::string>("rdbms")=="postgresql"||@@.get<int>("hasPrimaryKey")!=1)
     {
@@ -1092,6 +1304,7 @@ bool [[className]]::validateMasqueradedJsonForCreation(const Json::Value &pJson,
         err = "Bad masquerading vector";
         return false;
     }
+    try {
 <%c++
     for(size_t i=0;i<cols.size();i++)
     {
@@ -1099,13 +1312,13 @@ bool [[className]]::validateMasqueradedJsonForCreation(const Json::Value &pJson,
         if(col.colType_.empty())
             continue;
 %>
-    if(!pMasqueradingVector[{%i%}].empty())
-    {
-        if(pJson.isMember(pMasqueradingVector[{%i%}]))
-        {
-            if(!validJsonOfField({%i%}, pMasqueradingVector[{%i%}], pJson[pMasqueradingVector[{%i%}]], err, true))
-                return false;
-        }
+      if(!pMasqueradingVector[{%i%}].empty())
+      {
+          if(pJson.isMember(pMasqueradingVector[{%i%}]))
+          {
+              if(!validJsonOfField({%i%}, pMasqueradingVector[{%i%}], pJson[pMasqueradingVector[{%i%}]], err, true))
+                  return false;
+          }
 <%c++if(col.notNull_ && !col.isAutoVal_ && !col.hasDefaultVal_){%>
         else
         {
@@ -1113,8 +1326,14 @@ bool [[className]]::validateMasqueradedJsonForCreation(const Json::Value &pJson,
             return false;
         }
 <%c++}%>
-    }
+      }
 <%c++}%>
+    }
+    catch(const Json::LogicError &e)
+    {
+      err = e.what();
+      return false;
+    }
     return true;
 }
 bool [[className]]::validateJsonForUpdate(const Json::Value &pJson, std::string &err)
@@ -1140,7 +1359,7 @@ bool [[className]]::validateJsonForUpdate(const Json::Value &pJson, std::string 
         err = "The value of primary key must be set in the json object for update";
         return false;
     }
-<%c++        
+<%c++
     }
 }%>
     return true;
@@ -1154,6 +1373,7 @@ bool [[className]]::validateMasqueradedJsonForUpdate(const Json::Value &pJson,
         err = "Bad masquerading vector";
         return false;
     }
+    try {
 <%c++
     for(size_t i=0;i<cols.size();i++)
     {
@@ -1161,12 +1381,12 @@ bool [[className]]::validateMasqueradedJsonForUpdate(const Json::Value &pJson,
         if(col.colType_.empty())
             continue;
 %>
-    if(!pMasqueradingVector[{%i%}].empty() && pJson.isMember(pMasqueradingVector[{%i%}]))
-    {
-        if(!validJsonOfField({%i%}, pMasqueradingVector[{%i%}], pJson[pMasqueradingVector[{%i%}]], err, false))
-            return false;
-    }
-<%c++    
+      if(!pMasqueradingVector[{%i%}].empty() && pJson.isMember(pMasqueradingVector[{%i%}]))
+      {
+          if(!validJsonOfField({%i%}, pMasqueradingVector[{%i%}], pJson[pMasqueradingVector[{%i%}]], err, false))
+              return false;
+      }
+<%c++
     if(col.isPrimaryKey_)
     {
 %>
@@ -1175,15 +1395,21 @@ bool [[className]]::validateMasqueradedJsonForUpdate(const Json::Value &pJson,
         err = "The value of primary key must be set in the json object for update";
         return false;
     }
-<%c++        
+<%c++
     }
 }%>
+    }
+    catch(const Json::LogicError &e)
+    {
+      err = e.what();
+      return false;
+    }
     return true;
 }
 bool [[className]]::validJsonOfField(size_t index,
      {%indentStr%}                   const std::string &fieldName,
-     {%indentStr%}                   const Json::Value &pJson, 
-     {%indentStr%}                   std::string &err, 
+     {%indentStr%}                   const Json::Value &pJson,
+     {%indentStr%}                   std::string &err,
      {%indentStr%}                   bool isForCreation)
 {
     switch(index)
@@ -1204,7 +1430,7 @@ bool [[className]]::validJsonOfField(size_t index,
             }
 <%c++}
             if(col.isAutoVal_)
-            {  
+            {
                 if(col.isPrimaryKey_)
                 {
 %>
@@ -1212,8 +1438,8 @@ bool [[className]]::validJsonOfField(size_t index,
             {
                 err="The automatic primary key cannot be set";
                 return false;
-            }        
-<%c++                    
+            }
+<%c++
                 }else
                 {
 %>
@@ -1227,15 +1453,15 @@ bool [[className]]::validJsonOfField(size_t index,
                 err="The automatic primary key cannot be update";
                 return false;
             }
-<%c++                    
+<%c++
                 }
-            } 
+            }
 if(!col.notNull_){%>
             if(pJson.isNull())
             {
                 return true;
             }
-<%c++}            
+<%c++}
             if(col.colType_ == "uint64_t")
             {
 %>
@@ -1266,7 +1492,7 @@ if(!col.notNull_){%>
             }
 <%c++
             }
-            else if(col.colType_.find("int") == 0)
+            else if(col.colType_.find("int") == 0 || col.colType_ == "short")
             {
 %>
             if(!pJson.isInt())
@@ -1294,7 +1520,7 @@ if(!col.notNull_){%>
                 err="Type error in the "+fieldName+" field";
                 return false;
             }
-<%c++               
+<%c++
             }
             else
             {
@@ -1302,19 +1528,18 @@ if(!col.notNull_){%>
             if(!pJson.isString())
             {
                 err="Type error in the "+fieldName+" field";
-                return false;                
+                return false;
             }
 <%c++
                 if(col.colType_ == "std::string" && col.colLength_>0)
                 {
 %>
-            // asString().length() creates a string object, is there any better way to validate the length?
-            if(pJson.isString() && pJson.asString().length() > {%col.colLength_%})
+            if(pJson.isString() && std::strlen(pJson.asCString()) > {%col.colLength_%})
             {
                 err="String length exceeds limit for the " +
                     fieldName +
                     " field (the maximum value is {%col.colLength_%})";
-                return false;               
+                return false;
             }
 
 <%c++
@@ -1323,11 +1548,10 @@ if(!col.notNull_){%>
 %>
             break;
 <%c++
-}%>     
+}%>
         default:
             err="Internal error in the server";
             return false;
-            break;
     }
     return true;
 }
@@ -1343,33 +1567,54 @@ for(auto &relationship : relationships)
         auto relationshipValName=nameTransform(name, false);
         auto alias=relationship.targetTableAlias();
         auto aliasValName=nameTransform(alias, false);
+        if(!alias.empty())
+        {
+            if(alias[0] <= 'z' && alias[0] >= 'a')
+            {
+                alias[0] += ('A' - 'a');
+            }
+        }
+        else
+        {
+            alias = relationshipClassName;
+        }
+		std::string alind(alias.length(), ' ');
         if(relationship.type() == Relationship::Type::HasOne)
         {
-            if(!alias.empty())
-            {
-                if(alias[0] <= 'z' && alias[0] >= 'a')
-                {
-                    alias[0] += ('A' - 'a');
-                }
-                std::string alind(alias.length(), ' ');
 %>
-void [[className]]::get{%alias%}(const DbClientPtr &clientPtr, 
-     {%indentStr%}     {%alind%} const std::function<void({%relationshipClassName%})> &rcb,
-     {%indentStr%}     {%alind%} const ExceptionCallback &ecb) const
-<%c++
+{%relationshipClassName%} [[className]]::get{%alias%}(const DbClientPtr &clientPtr) const {
+    static const std::string sql = "select * from {%name%} where {%relationship.targetKey()%} = <%c++
+            if(rdbms=="postgresql")
+            {
+                $$<<"$1";
             }
             else
             {
-                std::string relationshipClassInde(relationshipClassName.length(), ' ');
-%>
-void [[className]]::get{%relationshipClassName%}(const DbClientPtr &clientPtr, 
-     {%indentStr%}     {%relationshipClassInde%} const std::function<void({%relationshipClassName%})> &rcb,
-     {%indentStr%}     {%relationshipClassInde%} const ExceptionCallback &ecb) const
-<%c++
-            }
-%>
+                $$<<"?";
+            }%>";
+    Result r(nullptr);
+    {
+        auto binder = *clientPtr << sql;
+        binder << *{%nameTransform(relationship.originalKey(), false)%}_ << Mode::Blocking >>
+            [&r](const Result &result) { r = result; };
+        binder.exec();
+    }
+    if (r.size() == 0)
+    {
+        throw UnexpectedRows("0 rows found");
+    }
+    else if (r.size() > 1)
+    {
+        throw UnexpectedRows("Found more than one row");
+    }
+    return {%relationshipClassName%}(r[0]);
+}
+
+void [[className]]::get{%alias%}(const DbClientPtr &clientPtr,
+     {%indentStr%}     {%alind%} const std::function<void({%relationshipClassName%})> &rcb,
+     {%indentStr%}     {%alind%} const ExceptionCallback &ecb) const
 {
-    const static std::string sql = "select * from {%name%} where {%relationship.targetKey()%} = <%c++
+    static const std::string sql = "select * from {%name%} where {%relationship.targetKey()%} = <%c++
             if(rdbms=="postgresql")
             {
                 $$<<"$1";
@@ -1379,7 +1624,7 @@ void [[className]]::get{%relationshipClassName%}(const DbClientPtr &clientPtr,
                 $$<<"?";
             }%>";
     *clientPtr << sql
-               << *{%nameTransform(relationship.originalKey(), false)%}_ 
+               << *{%nameTransform(relationship.originalKey(), false)%}_
                >> [rcb = std::move(rcb), ecb](const Result &r){
                     if (r.size() == 0)
                     {
@@ -1400,31 +1645,38 @@ void [[className]]::get{%relationshipClassName%}(const DbClientPtr &clientPtr,
         }
         else if(relationship.type() == Relationship::Type::HasMany)
         {
-            if(!alias.empty())
-            {
-                if(alias[0] <= 'z' && alias[0] >= 'a')
-                {
-                    alias[0] += ('A' - 'a');
-                }
-                std::string alind(alias.length(), ' ');
 %>
-void [[className]]::get{%alias%}(const DbClientPtr &clientPtr, 
-     {%indentStr%}     {%alind%} const std::function<void(std::vector<{%relationshipClassName%}>)> &rcb,
-     {%indentStr%}     {%alind%} const ExceptionCallback &ecb) const
-<%c++
+std::vector<{%relationshipClassName%}> [[className]]::get{%alias%}(const DbClientPtr &clientPtr) const {
+    static const std::string sql = "select * from {%name%} where {%relationship.targetKey()%} = <%c++
+            if(rdbms=="postgresql")
+            {
+                $$<<"$1";
             }
             else
             {
-                std::string relationshipClassInde(relationshipClassName.length(), ' ');
-%>
-void [[className]]::get{%relationshipClassName%}(const DbClientPtr &clientPtr, 
-     {%indentStr%}     {%relationshipClassInde%} const std::function<void(std::vector<{%relationshipClassName%}>)> &rcb,
-     {%indentStr%}     {%relationshipClassInde%} const ExceptionCallback &ecb) const
-<%c++
-            }
-%>
+                $$<<"?";
+            }%>";
+    Result r(nullptr);
+    {
+        auto binder = *clientPtr << sql;
+        binder << *{%nameTransform(relationship.originalKey(), false)%}_ << Mode::Blocking >>
+            [&r](const Result &result) { r = result; };
+        binder.exec();
+    }
+    std::vector<{%relationshipClassName%}> ret;
+    ret.reserve(r.size());
+    for (auto const &row : r)
+    {
+        ret.emplace_back({%relationshipClassName%}(row));
+    }
+    return ret;
+}
+
+void [[className]]::get{%alias%}(const DbClientPtr &clientPtr,
+     {%indentStr%}     {%alind%} const std::function<void(std::vector<{%relationshipClassName%}>)> &rcb,
+     {%indentStr%}     {%alind%} const ExceptionCallback &ecb) const
 {
-    const static std::string sql = "select * from {%name%} where {%relationship.targetKey()%} = <%c++
+    static const std::string sql = "select * from {%name%} where {%relationship.targetKey()%} = <%c++
             if(rdbms=="postgresql")
             {
                 $$<<"$1";
@@ -1434,10 +1686,10 @@ void [[className]]::get{%relationshipClassName%}(const DbClientPtr &clientPtr,
                 $$<<"?";
             }%>";
     *clientPtr << sql
-               << *{%nameTransform(relationship.originalKey(), false)%}_ 
+               << *{%nameTransform(relationship.originalKey(), false)%}_
                >> [rcb = std::move(rcb)](const Result &r){
                    std::vector<{%relationshipClassName%}> ret;
-                   ret.reserve(ret.size());
+                   ret.reserve(r.size());
                    for (auto const &row : r)
                    {
                        ret.emplace_back({%relationshipClassName%}(row));
@@ -1454,31 +1706,39 @@ void [[className]]::get{%relationshipClassName%}(const DbClientPtr &clientPtr,
             auto pivotTableClassName=nameTransform(pivotTableName, true);
             auto &pivotOriginalKey=relationship.pivotTable().originalKey();
             auto &pivotTargetKey=relationship.pivotTable().targetKey();
-            if(!alias.empty())
-            {
-                if(alias[0] <= 'z' && alias[0] >= 'a')
-                {
-                    alias[0] += ('A' - 'a');
-                }
-                std::string alind(alias.length(), ' ');
 %>
-void [[className]]::get{%alias%}(const DbClientPtr &clientPtr, 
-     {%indentStr%}     {%alind%} const std::function<void(std::vector<std::pair<{%relationshipClassName%},{%pivotTableClassName%}>>)> &rcb,
-     {%indentStr%}     {%alind%} const ExceptionCallback &ecb) const
-<%c++
+std::vector<std::pair<{%relationshipClassName%},{%pivotTableClassName%}>> [[className]]::get{%alias%}(const DbClientPtr &clientPtr) const {
+    static const std::string sql = "select * from {%name%},{%pivotTableName%} where {%pivotTableName%}.{%pivotOriginalKey%} = <%c++
+            if(rdbms=="postgresql")
+            {
+                $$<<"$1";
             }
             else
             {
-                std::string relationshipClassInde(relationshipClassName.length(), ' ');
-%>
-void [[className]]::get{%relationshipClassName%}(const DbClientPtr &clientPtr, 
-     {%indentStr%}     {%relationshipClassInde%} const std::function<void(std::vector<std::pair<{%relationshipClassName%},{%pivotTableClassName%}>>)> &rcb,
-     {%indentStr%}     {%relationshipClassInde%} const ExceptionCallback &ecb) const
-<%c++
-            }
-%>
+                $$<<"?";
+            }%> and {%pivotTableName%}.{%pivotTargetKey%} = {%name%}.{%relationship.targetKey()%}";
+    Result r(nullptr);
+    {
+        auto binder = *clientPtr << sql;
+        binder << *{%nameTransform(relationship.originalKey(), false)%}_ << Mode::Blocking >>
+            [&r](const Result &result) { r = result; };
+        binder.exec();
+    }
+    std::vector<std::pair<{%relationshipClassName%},{%pivotTableClassName%}>> ret;
+    ret.reserve(r.size());
+    for (auto const &row : r)
+    {
+        ret.emplace_back(std::pair<{%relationshipClassName%},{%pivotTableClassName%}>(
+            {%relationshipClassName%}(row),{%pivotTableClassName%}(row,{%relationshipClassName%}::getColumnNumber())));
+    }
+    return ret;
+}
+
+void [[className]]::get{%alias%}(const DbClientPtr &clientPtr,
+     {%indentStr%}     {%alind%} const std::function<void(std::vector<std::pair<{%relationshipClassName%},{%pivotTableClassName%}>>)> &rcb,
+     {%indentStr%}     {%alind%} const ExceptionCallback &ecb) const
 {
-    const static std::string sql = "select * from {%name%},{%pivotTableName%} where {%pivotTableName%}.{%pivotOriginalKey%} = <%c++
+    static const std::string sql = "select * from {%name%},{%pivotTableName%} where {%pivotTableName%}.{%pivotOriginalKey%} = <%c++
             if(rdbms=="postgresql")
             {
                 $$<<"$1";
@@ -1488,10 +1748,10 @@ void [[className]]::get{%relationshipClassName%}(const DbClientPtr &clientPtr,
                 $$<<"?";
             }%> and {%pivotTableName%}.{%pivotTargetKey%} = {%name%}.{%relationship.targetKey()%}";
     *clientPtr << sql
-               << *{%nameTransform(relationship.originalKey(), false)%}_ 
+               << *{%nameTransform(relationship.originalKey(), false)%}_
                >> [rcb = std::move(rcb)](const Result &r){
                    std::vector<std::pair<{%relationshipClassName%},{%pivotTableClassName%}>> ret;
-                   ret.reserve(ret.size());
+                   ret.reserve(r.size());
                    for (auto const &row : r)
                    {
                        ret.emplace_back(std::pair<{%relationshipClassName%},{%pivotTableClassName%}>(
